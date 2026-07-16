@@ -1,0 +1,13 @@
+name: qa
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and validate
+        run: ./scripts/qa.sh
