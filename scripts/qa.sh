@@ -7,6 +7,7 @@ APP_DIR="$BUILD_DIR/CodexRecentTasksSidebar.app"
 BINARY="$APP_DIR/Contents/MacOS/Codex最近任务栏"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
+FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
 
 "$ROOT/scripts/build_app.sh"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
@@ -28,23 +29,60 @@ CREATE TABLE threads (
   source TEXT,
   agent_path TEXT
 );
+CREATE TABLE thread_spawn_edges (
+  parent_thread_id TEXT NOT NULL,
+  child_thread_id TEXT NOT NULL PRIMARY KEY,
+  status TEXT NOT NULL
+);
 INSERT INTO threads VALUES
-  ('00000000-0000-0000-0000-000000000001', 'Example recent task', '/tmp/example-project-a', 'main', 4102444800000, 4102444800, 0, '', '', ''),
+  ('00000000-0000-0000-0000-000000000001', 'Original example task', '/tmp/example-project-a', 'main', 4102444800000, 4102444800, 0, '', '', ''),
   ('00000000-0000-0000-0000-000000000002', 'Second example task', '/tmp/example-project-b', '', 4102444700000, 4102444700, 0, '', '', ''),
-  ('00000000-0000-0000-0000-000000000003', 'Excluded subagent task', '/tmp/example-project-a', '', 4102444600000, 4102444600, 0, 'subagent', '{"subagent":true}', '/tmp/agent');
+  ('00000000-0000-0000-0000-000000000003', 'Excluded internal agent task', '/tmp/example-project-a', '', 4102444600000, 4102444600, 0, 'subagent', '{"subagent":true}', '/tmp/agent'),
+  ('00000000-0000-0000-0000-000000000004', 'Recovered root task', '/tmp/example-project-a', '', 4102444500000, 4102444500, 0, 'subagent', '', ''),
+  ('00000000-0000-0000-0000-000000000005', 'Excluded child task', '/tmp/example-project-a', '', 4102444400000, 4102444400, 0, 'subagent', '', '');
+INSERT INTO thread_spawn_edges VALUES
+  ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000005', 'running');
 SQL
 
-before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
-self_test_output="$(CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" "$BINARY" --self-test)"
-after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
+cat > "$FIXTURE_INDEX" <<'JSONL'
+{"id":"00000000-0000-0000-0000-000000000001","thread_name":"Earlier example name","updated_at":"2099-12-31T23:59:00Z"}
+{"id":"00000000-0000-0000-0000-000000000001","thread_name":"Renamed example task","updated_at":"2100-01-01T00:00:00Z"}
+{"id":"00000000-0000-0000-0000-000000000002","thread_name":"   ","updated_at":"2100-01-01T00:00:00Z"}
+{"id":"partial"
+JSONL
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=2"* ]] || {
+before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
+before_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
+self_test_output="$(
+  CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
+  CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
+  CODEX_SELF_TEST_EXPECT_TITLE="Renamed example task" \
+  "$BINARY" --self-test
+)"
+after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
+after_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
+
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
 [[ "$before_hash" == "$after_hash" ]] || {
   print -u2 "自检修改了固定测试库"
   exit 4
+}
+[[ "$before_index_hash" == "$after_index_hash" ]] || {
+  print -u2 "自检修改了固定任务备注索引"
+  exit 7
+}
+
+fallback_output="$(
+  CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
+  CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_DIR/missing-session-index.jsonl" \
+  "$BINARY" --self-test
+)"
+[[ "$fallback_output" == *"SELF_TEST_OK count=3"* ]] || {
+  print -u2 "缺失任务备注索引回退测试失败：$fallback_output"
+  exit 8
 }
 
 set +e

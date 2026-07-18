@@ -33,6 +33,26 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         let name = URL(fileURLWithPath: canonicalProjectPath).lastPathComponent
         return name.isEmpty ? "未归类" : name
     }
+
+    func replacingTitle(with newTitle: String) -> CodexTask {
+        CodexTask(
+            id: id,
+            title: newTitle,
+            cwd: cwd,
+            gitBranch: gitBranch,
+            updatedMillis: updatedMillis
+        )
+    }
+}
+
+private struct ThreadNameRecord: Decodable {
+    let id: String
+    let threadName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case threadName = "thread_name"
+    }
 }
 
 struct TaskGroup: Identifiable {
@@ -80,11 +100,15 @@ struct TaskRepository {
       cwd,
       COALESCE(git_branch, '') AS git_branch,
       CAST(COALESCE(NULLIF(updated_at_ms, 0), updated_at * 1000) AS INTEGER) AS updated_ms
-    FROM threads
+    FROM threads AS task
     WHERE archived = 0
-      AND COALESCE(thread_source, '') <> 'subagent'
       AND COALESCE(source, '') NOT LIKE '{"subagent"%'
       AND (agent_path IS NULL OR agent_path = '')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM thread_spawn_edges AS edge
+        WHERE edge.child_thread_id = task.id
+      )
     ORDER BY updated_ms DESC, id ASC;
     """
 
@@ -122,11 +146,54 @@ struct TaskRepository {
         }
 
         do {
-            let tasks = data.isEmpty ? [] : try JSONDecoder().decode([CodexTask].self, from: data)
+            let decodedTasks = data.isEmpty ? [] : try JSONDecoder().decode([CodexTask].self, from: data)
+            let titleOverrides = loadLatestThreadNames()
+            let tasks = decodedTasks.map { task in
+                guard let title = titleOverrides[task.id] else { return task }
+                return task.replacingTitle(with: title)
+            }
             return (databaseURL, tasks)
         } catch {
             throw TaskRepositoryError.invalidData(error.localizedDescription)
         }
+    }
+
+    private static func loadLatestThreadNames() -> [String: String] {
+        guard let indexURL = currentSessionIndexURL(),
+              let data = try? Data(contentsOf: indexURL) else {
+            return [:]
+        }
+
+        let decoder = JSONDecoder()
+        var namesByID: [String: String] = [:]
+
+        // ponytail: Codex 的 session_index.jsonl 是追加式索引，因此每个 ID 最后一条有效记录即为最新备注。
+        // 如果未来改成非追加格式，再升级为解析 updated_at 后比较时间。
+        for line in data.split(separator: 0x0A) {
+            guard let record = try? decoder.decode(ThreadNameRecord.self, from: Data(line)),
+                  let rawName = record.threadName else {
+                continue
+            }
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            namesByID[record.id] = name
+        }
+
+        return namesByID
+    }
+
+    private static func currentSessionIndexURL() -> URL? {
+        let fileManager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+
+        if let override = environment["CODEX_SESSION_INDEX_OVERRIDE"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            return fileManager.fileExists(atPath: url.path) ? url : nil
+        }
+
+        let url = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/session_index.jsonl")
+        return fileManager.fileExists(atPath: url.path) ? url : nil
     }
 
     private static func currentDatabaseURL() throws -> URL {
@@ -1060,6 +1127,14 @@ enum SelfTest {
                 fputs("SELF_TEST_FAILED duplicate thread IDs\n", stderr)
                 return 2
             }
+            var titleOverrideStatus = ""
+            if let expectedTitle = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_TITLE"] {
+                guard tasks.contains(where: { $0.title == expectedTitle }) else {
+                    fputs("SELF_TEST_FAILED title override\n", stderr)
+                    return 7
+                }
+                titleOverrideStatus = " title_override=ok"
+            }
             guard tasks.allSatisfy({ !$0.id.isEmpty && !$0.cwd.isEmpty && $0.updatedMillis > 0 && $0.deepLink != nil }) else {
                 fputs("SELF_TEST_FAILED invalid task fields\n", stderr)
                 return 3
@@ -1112,7 +1187,7 @@ enum SelfTest {
                 return 6
             }
 
-            print("SELF_TEST_OK count=\(tasks.count) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)

@@ -10,12 +10,13 @@ Build from the bundled template instead of recreating the app. Preserve its read
 ## Workflow
 
 1. Confirm the machine is macOS 13 or newer and has `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
-2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database under `~/.codex/` without copying, printing, or committing task contents.
+2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database and `session_index.jsonl` under `~/.codex/` without copying, printing, or committing task contents.
 3. Use `scripts/build_app.sh [output-directory]`. The script compiles the template for the current Mac architecture and creates an ad-hoc-signed `CodexRecentTasksSidebar.app` whose visible name is “Codex 最近任务”.
 4. Run the repository-level `scripts/qa.sh` when working from the full repository. If the Skill is installed alone, run the built binary with `--self-test` against a disposable SQLite fixture before using the real database.
 5. Launch the app and verify the real UI:
    - the custom icon and Dock item are present;
    - recent tasks are grouped by canonical working folder and sorted newest first;
+   - renamed task notes from `session_index.jsonl` replace stale database titles on the next refresh;
    - left and right docking both work;
    - docked mode follows the Codex foreground/background layer;
    - pinned mode stays above other apps and remains draggable;
@@ -31,10 +32,10 @@ The public template intentionally uses the generic bundle identifier `io.github.
 
 ## Safety boundaries
 
-- Treat the Codex SQLite database as read-only. Never migrate, vacuum, replace, upload, or write to it.
+- Treat the Codex SQLite database and `session_index.jsonl` as read-only. Never migrate, vacuum, replace, upload, or write to them.
 - Never commit a real `.sqlite` file, task title, thread ID, username path, API key, token, crash log, or local build cache.
 - Keep task selection keyed by the unique thread ID; titles are not unique identifiers.
-- Keep archived tasks, subagent threads, and internal agent records excluded.
+- Keep archived tasks, threads with a real parent edge, and internal agent records excluded. Do not exclude a root thread solely because `thread_source` is labeled `subagent`.
 - Do not claim cross-platform support. The bundled app targets macOS 13+ and is validated on Apple Silicon; compile natively on the target Mac.
 - If the Codex database schema, bundle identifier, or deep-link scheme changes, diagnose the current installation before patching the template.
 
