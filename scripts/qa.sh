@@ -8,6 +8,7 @@ BINARY="$APP_DIR/Contents/MacOS/Codex最近任务栏"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
+FIXTURE_USAGE_SERVER="$FIXTURE_DIR/fake-codex"
 
 "$ROOT/scripts/build_app.sh"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
@@ -51,6 +52,20 @@ cat > "$FIXTURE_INDEX" <<'JSONL'
 {"id":"partial"
 JSONL
 
+cat > "$FIXTURE_USAGE_SERVER" <<'ZSH'
+#!/bin/zsh
+request_count=0
+while IFS= read -r line; do
+  (( request_count += 1 ))
+  if (( request_count == 1 )); then
+    print '{"id":1,"result":{"serverInfo":{"name":"fake-codex","version":"1"}}}'
+  elif (( request_count >= 2 )); then
+    print '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":35,"windowDurationMins":300},"secondary":{"usedPercent":90,"windowDurationMins":10080}}}}'
+  fi
+done
+ZSH
+chmod +x "$FIXTURE_USAGE_SERVER"
+
 before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 before_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 self_test_output="$(
@@ -62,9 +77,30 @@ self_test_output="$(
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 after_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok usage=ok"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
+}
+
+usage_test_output="$(
+  CODEX_APP_SERVER_OVERRIDE="$FIXTURE_USAGE_SERVER" \
+  "$BINARY" --usage-self-test
+)"
+[[ "$usage_test_output" == "USAGE_SELF_TEST_OK windows=2" ]] || {
+  print -u2 "Codex 用量协议自检失败：$usage_test_output"
+  exit 9
+}
+
+set +e
+missing_usage_output="$({
+  CODEX_APP_SERVER_OVERRIDE="$FIXTURE_DIR/missing-codex" \
+  "$BINARY" --usage-self-test
+} 2>&1)"
+missing_usage_status=$?
+set -e
+[[ $missing_usage_status -eq 12 && "$missing_usage_output" == *"USAGE_SELF_TEST_FAILED"* ]] || {
+  print -u2 "Codex 用量程序缺失边界测试失败"
+  exit 10
 }
 [[ "$before_hash" == "$after_hash" ]] || {
   print -u2 "自检修改了固定测试库"
@@ -107,4 +143,5 @@ if /usr/bin/grep -R -n -E \
 fi
 
 print "$self_test_output"
+print "$usage_test_output"
 print "QA_OK app=$APP_DIR"

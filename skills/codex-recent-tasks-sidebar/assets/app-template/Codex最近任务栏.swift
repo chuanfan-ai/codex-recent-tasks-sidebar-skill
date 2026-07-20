@@ -500,6 +500,342 @@ final class TaskStore: ObservableObject {
     }
 }
 
+struct UsageWindowDisplay: Identifiable, Equatable {
+    let label: String
+    let remainingPercent: Int
+
+    var id: String { label }
+}
+
+enum UsageState: Equatable {
+    case loading
+    case available([UsageWindowDisplay])
+    case unavailable(String)
+}
+
+enum CodexUsageError: LocalizedError {
+    case executableNotFound
+    case launchFailed(String)
+    case protocolFailed(String)
+    case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .executableNotFound:
+            return "没有找到 Codex 官方程序。请确认 ChatGPT / Codex 已安装。"
+        case let .launchFailed(message):
+            return "无法启动 Codex 用量服务：\(message)"
+        case let .protocolFailed(message):
+            return "Codex 用量响应异常：\(message)"
+        case .timedOut:
+            return "读取 Codex 剩余用量超时。"
+        }
+    }
+}
+
+enum UsageSnapshotParser {
+    static func windows(from result: [String: Any]) throws -> [UsageWindowDisplay] {
+        guard let rateLimits = result["rateLimits"] as? [String: Any] else {
+            throw CodexUsageError.protocolFailed("缺少 rateLimits")
+        }
+
+        let candidates: [(key: String, fallback: String)] = [
+            ("primary", "主要额度"),
+            ("secondary", "次要额度"),
+        ]
+        let windows = candidates.compactMap { candidate -> UsageWindowDisplay? in
+            guard let rawWindow = rateLimits[candidate.key] as? [String: Any],
+                  let usedNumber = rawWindow["usedPercent"] as? NSNumber else {
+                return nil
+            }
+            let usedPercent = min(max(usedNumber.intValue, 0), 100)
+            let duration = (rawWindow["windowDurationMins"] as? NSNumber)?.intValue
+            return UsageWindowDisplay(
+                label: durationLabel(minutes: duration, fallback: candidate.fallback),
+                remainingPercent: 100 - usedPercent
+            )
+        }
+
+        guard !windows.isEmpty else {
+            throw CodexUsageError.protocolFailed("没有可显示的用量周期")
+        }
+        return windows
+    }
+
+    private static func durationLabel(minutes: Int?, fallback: String) -> String {
+        guard let minutes, minutes > 0 else { return fallback }
+        if minutes == 10_080 { return "每周" }
+        if minutes % 1_440 == 0 { return "\(minutes / 1_440) 天" }
+        if minutes % 60 == 0 { return "\(minutes / 60) 小时" }
+        return "\(minutes) 分钟"
+    }
+}
+
+final class CodexUsageClient {
+    typealias Completion = (Result<[UsageWindowDisplay], Error>) -> Void
+
+    private let queue = DispatchQueue(label: "io.github.codexrecenttasks.usage")
+    private var process: Process?
+    private var inputHandle: FileHandle?
+    private var outputHandle: FileHandle?
+    private var readBuffer = Data()
+    private var initialized = false
+    private var isStopping = false
+    private var currentRequestID: Int?
+    private var nextRequestID = 2
+    private var pendingCompletions: [Completion] = []
+
+    func refresh(completion: @escaping Completion) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingCompletions.append(completion)
+            if self.process?.isRunning == true {
+                if self.initialized {
+                    self.sendRateLimitsRequestIfNeeded()
+                }
+                return
+            }
+            self.start()
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            shutdown()
+            pendingCompletions.removeAll()
+        }
+    }
+
+    private func start() {
+        do {
+            let executableURL = try Self.executableURL()
+            let process = Process()
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+
+            process.executableURL = executableURL
+            process.arguments = ["app-server", "--stdio"]
+            process.standardInput = inputPipe
+            process.standardOutput = outputPipe
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] terminatedProcess in
+                self?.queue.async {
+                    guard let self,
+                          self.process === terminatedProcess,
+                          !self.isStopping else { return }
+                    self.failPending(
+                        CodexUsageError.launchFailed("进程退出码 \(terminatedProcess.terminationStatus)")
+                    )
+                    self.resetProcessState()
+                }
+            }
+
+            outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                self?.queue.async {
+                    self?.consume(data)
+                }
+            }
+
+            self.process = process
+            inputHandle = inputPipe.fileHandleForWriting
+            outputHandle = outputPipe.fileHandleForReading
+            readBuffer.removeAll(keepingCapacity: true)
+            initialized = false
+            isStopping = false
+            currentRequestID = nil
+
+            try process.run()
+            let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
+            send([
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "clientInfo": [
+                        "name": "codex-recent-tasks-sidebar",
+                        "title": "Codex 最近任务栏",
+                        "version": appVersion,
+                    ],
+                ],
+            ])
+            scheduleTimeout(for: 1)
+        } catch {
+            failPending(error)
+            shutdown()
+        }
+    }
+
+    private func consume(_ data: Data) {
+        readBuffer.append(data)
+        while let newline = readBuffer.firstIndex(of: 0x0A) {
+            let line = Data(readBuffer[..<newline])
+            readBuffer.removeSubrange(...newline)
+            guard !line.isEmpty,
+                  let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+                continue
+            }
+            handle(object)
+        }
+    }
+
+    private func handle(_ object: [String: Any]) {
+        guard let id = (object["id"] as? NSNumber)?.intValue else { return }
+
+        if id == 1, !initialized {
+            guard object["error"] == nil else {
+                failPending(CodexUsageError.protocolFailed("初始化失败"))
+                shutdown()
+                return
+            }
+            initialized = true
+            send(["method": "initialized"])
+            sendRateLimitsRequestIfNeeded()
+            return
+        }
+
+        guard id == currentRequestID else { return }
+        currentRequestID = nil
+        do {
+            guard object["error"] == nil,
+                  let result = object["result"] as? [String: Any] else {
+                throw CodexUsageError.protocolFailed("读取请求失败")
+            }
+            let windows = try UsageSnapshotParser.windows(from: result)
+            completePending(with: .success(windows))
+        } catch {
+            completePending(with: .failure(error))
+        }
+    }
+
+    private func sendRateLimitsRequestIfNeeded() {
+        guard initialized, currentRequestID == nil, !pendingCompletions.isEmpty else { return }
+        let requestID = nextRequestID
+        nextRequestID += 1
+        currentRequestID = requestID
+        send([
+            "id": requestID,
+            "method": "account/rateLimits/read",
+            "params": NSNull(),
+        ])
+        scheduleTimeout(for: requestID)
+    }
+
+    private func send(_ object: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(object),
+              var data = try? JSONSerialization.data(withJSONObject: object) else {
+            failPending(CodexUsageError.protocolFailed("无法编码请求"))
+            shutdown()
+            return
+        }
+        data.append(0x0A)
+        inputHandle?.write(data)
+    }
+
+    private func scheduleTimeout(for requestID: Int) {
+        queue.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self else { return }
+            let isStillWaiting = requestID == 1 ? !self.initialized : self.currentRequestID == requestID
+            guard isStillWaiting else { return }
+            self.failPending(CodexUsageError.timedOut)
+            self.shutdown()
+        }
+    }
+
+    private func completePending(with result: Result<[UsageWindowDisplay], Error>) {
+        let completions = pendingCompletions
+        pendingCompletions.removeAll()
+        completions.forEach { $0(result) }
+    }
+
+    private func failPending(_ error: Error) {
+        completePending(with: .failure(error))
+    }
+
+    private func shutdown() {
+        isStopping = true
+        outputHandle?.readabilityHandler = nil
+        inputHandle?.closeFile()
+        if process?.isRunning == true {
+            process?.terminate()
+        }
+        resetProcessState()
+        isStopping = false
+    }
+
+    private func resetProcessState() {
+        outputHandle?.readabilityHandler = nil
+        process = nil
+        inputHandle = nil
+        outputHandle = nil
+        readBuffer.removeAll(keepingCapacity: false)
+        initialized = false
+        currentRequestID = nil
+    }
+
+    private static func executableURL() throws -> URL {
+        let fileManager = FileManager.default
+        if let override = ProcessInfo.processInfo.environment["CODEX_APP_SERVER_OVERRIDE"], !override.isEmpty {
+            guard fileManager.isExecutableFile(atPath: override) else {
+                throw CodexUsageError.executableNotFound
+            }
+            return URL(fileURLWithPath: override)
+        }
+
+        let candidates = [
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ]
+        guard let path = candidates.first(where: fileManager.isExecutableFile(atPath:)) else {
+            throw CodexUsageError.executableNotFound
+        }
+        return URL(fileURLWithPath: path)
+    }
+}
+
+@MainActor
+final class UsageStore: ObservableObject {
+    @Published private(set) var state: UsageState = .loading
+
+    private let client = CodexUsageClient()
+    private var refreshTimer: Timer?
+
+    init() {
+        refresh()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
+        }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
+        client.stop()
+    }
+
+    func refresh() {
+        client.refresh { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case let .success(windows):
+                    self.state = .available(windows)
+                case let .failure(error):
+                    self.state = .unavailable(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func stop() {
+        refreshTimer?.invalidate()
+        client.stop()
+    }
+}
+
 struct RecentTaskRowView: View {
     let projectName: String
     let task: CodexTask
@@ -600,6 +936,7 @@ struct FolderTaskSectionView: View {
 
 struct TaskListView: View {
     @ObservedObject var store: TaskStore
+    @ObservedObject var usageStore: UsageStore
     @ObservedObject var windowMode: WindowModeModel
     @State private var searchText = ""
 
@@ -647,15 +984,18 @@ struct TaskListView: View {
 
                 Spacer()
 
-                Button(action: store.refresh) {
+                Button {
+                    store.refresh()
+                    usageStore.refresh()
+                } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
                 .background(Color.primary.opacity(0.06), in: Circle())
-                .help("立即刷新")
-                .accessibilityLabel("立即刷新任务")
+                .help("立即刷新任务与剩余用量")
+                .accessibilityLabel("立即刷新任务与剩余用量")
             }
             .contentShape(Rectangle())
             .gesture(
@@ -675,6 +1015,8 @@ struct TaskListView: View {
                     }
             )
             .help(windowMode.mode == .docked ? "拖动标题区域向左或向右切换吸附位置" : "拖动窗口可自由移动")
+
+            usageSummary
 
             HStack(spacing: 8) {
                 windowModeButton(
@@ -707,6 +1049,91 @@ struct TaskListView: View {
         .padding(.horizontal, 14)
         .padding(.top, 13)
         .padding(.bottom, 10)
+    }
+
+    private var usageSummary: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "gauge.with.dots.needle.50percent")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(usageTint)
+
+            switch usageStore.state {
+            case .loading:
+                Text("正在读取剩余用量…")
+                    .foregroundStyle(.secondary)
+            case let .available(windows):
+                Text("剩余用量")
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                ForEach(windows) { window in
+                    HStack(spacing: 3) {
+                        Text(window.label)
+                            .foregroundStyle(.secondary)
+                        Text("\(window.remainingPercent)%")
+                            .fontWeight(.semibold)
+                            .foregroundStyle(usageColor(for: window.remainingPercent))
+                            .monospacedDigit()
+                    }
+                    .fixedSize()
+                }
+            case .unavailable:
+                Text("用量暂时不可用")
+                    .foregroundStyle(.secondary)
+            }
+
+            if case .loading = usageStore.state {
+                Spacer()
+            } else if case .unavailable = usageStore.state {
+                Spacer()
+            }
+        }
+        .font(.system(size: 10.5))
+        .padding(.horizontal, 9)
+        .frame(height: 28)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .help(usageHelpText)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(usageAccessibilityLabel)
+    }
+
+    private var usageTint: Color {
+        switch usageStore.state {
+        case .loading:
+            return .secondary
+        case let .available(windows):
+            return windows.map(\.remainingPercent).min().map(usageColor(for:)) ?? .secondary
+        case .unavailable:
+            return .orange
+        }
+    }
+
+    private func usageColor(for remainingPercent: Int) -> Color {
+        if remainingPercent <= 10 { return .red }
+        if remainingPercent <= 30 { return .orange }
+        return .accentColor
+    }
+
+    private var usageHelpText: String {
+        switch usageStore.state {
+        case .loading:
+            return "正在通过 Codex 官方服务读取剩余用量"
+        case .available:
+            return "剩余用量每 60 秒刷新。不显示重置时间。"
+        case let .unavailable(message):
+            return message
+        }
+    }
+
+    private var usageAccessibilityLabel: String {
+        switch usageStore.state {
+        case .loading:
+            return "正在读取剩余用量"
+        case let .available(windows):
+            let details = windows.map { "\($0.label)剩余\($0.remainingPercent)%" }.joined(separator: "，")
+            return "剩余用量，\(details)"
+        case .unavailable:
+            return "用量暂时不可用"
+        }
     }
 
     private func windowModeButton(title: String, icon: String, mode: WindowDisplayMode) -> some View {
@@ -836,7 +1263,7 @@ struct TaskListView: View {
                 .frame(width: 6, height: 6)
             Text(windowMode.statusText)
             Spacer()
-            Text("近 48 小时 · 30 秒刷新")
+            Text("任务 30 秒 · 用量 60 秒")
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.tertiary)
@@ -849,6 +1276,7 @@ struct TaskListView: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let store = TaskStore()
+    private let usageStore = UsageStore()
     private let windowMode = WindowModeModel()
     private var panel: NSPanel?
     private var statusItem: NSStatusItem?
@@ -891,6 +1319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        usageStore.stop()
     }
 
     private func createPanel() {
@@ -915,7 +1344,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.delegate = self
         panel.setFrameAutosaveName("CodexRecentTasksPanelFrame")
-        panel.contentView = NSHostingView(rootView: TaskListView(store: store, windowMode: windowMode))
+        panel.contentView = NSHostingView(
+            rootView: TaskListView(store: store, usageStore: usageStore, windowMode: windowMode)
+        )
 
         if !panel.setFrameUsingName("CodexRecentTasksPanelFrame"), let screen = NSScreen.main {
             let visible = screen.visibleFrame
@@ -1088,7 +1519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "显示任务栏", action: #selector(showPanel), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "刷新任务", action: #selector(refreshTasks), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "刷新任务与用量", action: #selector(refreshTasks), keyEquivalent: "r"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
@@ -1099,6 +1530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showPanel() {
         guard let panel else { return }
         store.refresh()
+        usageStore.refresh()
         if windowMode.mode == .docked {
             dockToCodexWindow()
         }
@@ -1108,6 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func refreshTasks() {
         store.refresh()
+        usageStore.refresh()
         panel?.orderFrontRegardless()
     }
 
@@ -1187,11 +1620,79 @@ enum SelfTest {
                 return 6
             }
 
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus) database=\(result.databaseURL.path)")
+            let usageFixture: [String: Any] = [
+                "rateLimits": [
+                    "primary": ["usedPercent": 35, "windowDurationMins": 300],
+                    "secondary": ["usedPercent": 90, "windowDurationMins": 10_080],
+                ],
+            ]
+            let usageWindows = try UsageSnapshotParser.windows(from: usageFixture)
+            guard usageWindows == [
+                UsageWindowDisplay(label: "5 小时", remainingPercent: 65),
+                UsageWindowDisplay(label: "每周", remainingPercent: 10),
+            ] else {
+                fputs("SELF_TEST_FAILED usage parsing\n", stderr)
+                return 8
+            }
+
+            let clampedUsage = try UsageSnapshotParser.windows(from: [
+                "rateLimits": ["primary": ["usedPercent": 120]],
+            ])
+            guard clampedUsage == [UsageWindowDisplay(label: "主要额度", remainingPercent: 0)] else {
+                fputs("SELF_TEST_FAILED usage clamping\n", stderr)
+                return 9
+            }
+
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus) usage=ok database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
             return 1
+        }
+    }
+}
+
+enum UsageClientSelfTest {
+    static func run(expectFixtureValues: Bool = true) -> Int32 {
+        let client = CodexUsageClient()
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var capturedResult: Result<[UsageWindowDisplay], Error>?
+
+        client.refresh { result in
+            lock.lock()
+            capturedResult = result
+            lock.unlock()
+            semaphore.signal()
+        }
+
+        guard semaphore.wait(timeout: .now() + 18) == .success else {
+            client.stop()
+            fputs("USAGE_SELF_TEST_FAILED timeout\n", stderr)
+            return 10
+        }
+        client.stop()
+        lock.lock()
+        let result = capturedResult
+        lock.unlock()
+
+        switch result {
+        case let .success(windows):
+            guard !expectFixtureValues || windows == [
+                    UsageWindowDisplay(label: "5 小时", remainingPercent: 65),
+                    UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                  ] else {
+                fputs("USAGE_SELF_TEST_FAILED unexpected values\n", stderr)
+                return 11
+            }
+            print(expectFixtureValues ? "USAGE_SELF_TEST_OK windows=2" : "USAGE_PROBE_OK windows=\(windows.count)")
+            return 0
+        case let .failure(error):
+            fputs("USAGE_SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
+            return 12
+        case nil:
+            fputs("USAGE_SELF_TEST_FAILED no result\n", stderr)
+            return 13
         }
     }
 }
@@ -1202,6 +1703,12 @@ struct CodexRecentTasksMain {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             Darwin.exit(SelfTest.run())
+        }
+        if CommandLine.arguments.contains("--usage-self-test") {
+            Darwin.exit(UsageClientSelfTest.run())
+        }
+        if CommandLine.arguments.contains("--usage-probe") {
+            Darwin.exit(UsageClientSelfTest.run(expectFixtureValues: false))
         }
 
         let application = NSApplication.shared
