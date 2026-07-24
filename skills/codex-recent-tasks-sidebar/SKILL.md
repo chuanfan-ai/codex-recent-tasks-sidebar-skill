@@ -10,7 +10,7 @@ Build from the bundled template instead of recreating the app. Preserve its read
 ## Workflow
 
 1. Confirm the machine is macOS 13 or newer and has `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
-2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database, `session_index.jsonl`, and `.codex-global-state.json` under `~/.codex/` without copying, printing, or committing task contents or task IDs. The global state is used only to match Codex's unread task updates. Remaining usage is enabled by default and requires the official bundled `codex app-server` plus the user's existing signed-in state.
+2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database, `session_index.jsonl`, and `.codex-global-state.json` under `~/.codex/` without copying, printing, or committing task contents or task IDs. The global state is used only to match each visible top-level task's own Codex unread state; never promote a child thread's residual unread state to its parent. Remaining usage is enabled by default and requires the official bundled `codex app-server` plus the user's existing signed-in state.
 3. Use `scripts/build_app.sh [output-directory]`. The script compiles the template for the current Mac architecture and creates an ad-hoc-signed `CodexRecentTasksSidebar.app` whose visible name is “Codex 最近任务”.
 4. Run the repository-level `scripts/qa.sh` when working from the full repository. If the Skill is installed alone, run the built binary with `--self-test` against a disposable SQLite fixture and `--usage-self-test` against a fake executable supplied through `CODEX_APP_SERVER_OVERRIDE` before using real data.
 5. Launch the app and verify the real UI:
@@ -40,7 +40,7 @@ The public template intentionally uses the generic bundle identifier `io.github.
 - Keep task selection keyed by the unique thread ID; titles are not unique identifiers.
 - Keep archived tasks, threads with a real parent edge, and internal agent records excluded. Do not exclude a root thread solely because `thread_source` is labeled `subagent`.
 - Do not claim cross-platform support. The bundled app targets macOS 13+ and is validated on Apple Silicon; compile natively on the target Mac.
-- Interpret the green “待查看” label as “this task has a new unread update,” matching Codex's own unread indicator. It never means the conversation is permanently completed or archived.
+- Interpret the green “待查看” label as “this visible top-level task has a new unread update,” matching Codex's own unread indicator. Match the task ID directly and never infer it from child-thread state. It never means the conversation is permanently completed or archived.
 - If the Codex database schema, unread-state format, app-server rate-limit response, bundle identifier, or deep-link scheme changes, diagnose the current installation before patching the template.
 
 ## Delivery report

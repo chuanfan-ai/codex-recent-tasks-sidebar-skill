@@ -94,16 +94,6 @@ private struct ThreadNameRecord: Decodable {
     }
 }
 
-private struct ThreadSpawnEdgeRecord: Decodable {
-    let parentThreadID: String
-    let childThreadID: String
-
-    enum CodingKeys: String, CodingKey {
-        case parentThreadID = "parent_thread_id"
-        case childThreadID = "child_thread_id"
-    }
-}
-
 private enum UnreadTaskStateRepository {
     private static let persistedAtomsKey = "electron-persisted-atom-state"
     private static let unreadThreadsKey = "unread-thread-ids-by-host-v1"
@@ -137,27 +127,6 @@ private enum UnreadTaskStateRepository {
             }
         }
         return unreadThreadIDs
-    }
-
-    static func topLevelThreadIDs(
-        for unreadThreadIDs: Set<String>,
-        parentThreadIDsByChild: [String: String]
-    ) -> Set<String> {
-        Set(unreadThreadIDs.map { threadID in
-            var currentThreadID = threadID
-            var visitedThreadIDs = Set<String>()
-
-            // ponytail: 256 层足以覆盖真实任务树；若格式损坏形成环或超深链，停在最后一个安全节点。
-            for _ in 0..<256 {
-                guard visitedThreadIDs.insert(currentThreadID).inserted,
-                      let parentThreadID = parentThreadIDsByChild[currentThreadID],
-                      !parentThreadID.isEmpty else {
-                    break
-                }
-                currentThreadID = parentThreadID
-            }
-            return currentThreadID
-        })
     }
 
     private static func currentGlobalStateURL() -> URL? {
@@ -232,11 +201,6 @@ struct TaskRepository {
     ORDER BY updated_ms DESC, id ASC;
     """
 
-    private static let spawnEdgeQuery = """
-    SELECT parent_thread_id, child_thread_id
-    FROM thread_spawn_edges;
-    """
-
     static func loadTasks() throws -> (databaseURL: URL, tasks: [CodexTask]) {
         let databaseURL = try currentDatabaseURL()
         let outputPipe = Pipe()
@@ -274,17 +238,13 @@ struct TaskRepository {
             let decodedTasks = data.isEmpty ? [] : try JSONDecoder().decode([CodexTask].self, from: data)
             let titleOverrides = loadLatestThreadNames()
             let unreadThreadIDs = UnreadTaskStateRepository.loadUnreadThreadIDs()
-            let parentThreadIDsByChild = loadParentThreadIDs(from: databaseURL)
-            let topLevelUnreadThreadIDs = UnreadTaskStateRepository.topLevelThreadIDs(
-                for: unreadThreadIDs,
-                parentThreadIDsByChild: parentThreadIDsByChild
-            )
             let tasks = decodedTasks.map { task in
                 let renamedTask = titleOverrides[task.id].map {
                     task.replacingTitle(with: $0)
                 } ?? task
+                // Codex 按当前任务 ID 标记和清除未读。内部子线程的残留未读不能抬升为顶层任务未读。
                 return renamedTask.replacingUnreadUpdate(
-                    with: topLevelUnreadThreadIDs.contains(task.id)
+                    with: unreadThreadIDs.contains(task.id)
                 )
             }
             return (databaseURL, tasks)
@@ -315,33 +275,6 @@ struct TaskRepository {
         }
 
         return namesByID
-    }
-
-    private static func loadParentThreadIDs(from databaseURL: URL) -> [String: String] {
-        let outputPipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = [
-            "-readonly",
-            "-json",
-            "-cmd", ".timeout 800",
-            databaseURL.path,
-            spawnEdgeQuery,
-        ]
-        process.standardOutput = outputPipe
-        process.standardError = FileHandle.nullDevice
-
-        guard (try? process.run()) != nil else { return [:] }
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let edges = try? JSONDecoder().decode([ThreadSpawnEdgeRecord].self, from: data) else {
-            return [:]
-        }
-
-        return edges.reduce(into: [:]) { result, edge in
-            result[edge.childThreadID] = edge.parentThreadID
-        }
     }
 
     private static func currentSessionIndexURL() -> URL? {
@@ -1767,6 +1700,16 @@ enum SelfTest {
                 }
                 unreadOverrideStatus = " unread_override=ok"
             }
+            var readOverrideStatus = ""
+            if let expectedReadID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_READ_ID"] {
+                guard tasks.contains(where: {
+                    $0.id == expectedReadID && !$0.hasUnreadUpdate
+                }) else {
+                    fputs("SELF_TEST_FAILED read override\n", stderr)
+                    return 12
+                }
+                readOverrideStatus = " read_override=ok"
+            }
             guard tasks.allSatisfy({ !$0.id.isEmpty && !$0.cwd.isEmpty && $0.updatedMillis > 0 && $0.deepLink != nil }) else {
                 fputs("SELF_TEST_FAILED invalid task fields\n", stderr)
                 return 3
@@ -1865,19 +1808,8 @@ enum SelfTest {
                 fputs("SELF_TEST_FAILED unread state parsing\n", stderr)
                 return 11
             }
-            guard UnreadTaskStateRepository.topLevelThreadIDs(
-                for: ["00000000-0000-0000-0000-000000000003"],
-                parentThreadIDsByChild: [
-                    "00000000-0000-0000-0000-000000000003": "00000000-0000-0000-0000-000000000002",
-                    "00000000-0000-0000-0000-000000000002": "00000000-0000-0000-0000-000000000001",
-                ]
-            ) == ["00000000-0000-0000-0000-000000000001"] else {
-                fputs("SELF_TEST_FAILED unread parent mapping\n", stderr)
-                return 12
-            }
-
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus) usage=ok unread_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus) usage=ok unread_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)

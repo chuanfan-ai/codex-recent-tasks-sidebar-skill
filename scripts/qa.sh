@@ -58,6 +58,7 @@ cat > "$FIXTURE_GLOBAL_STATE" <<'JSON'
   "electron-persisted-atom-state": {
     "unread-thread-ids-by-host-v1": {
       "local": [
+        "00000000-0000-0000-0000-000000000002",
         "00000000-0000-0000-0000-000000000005",
         "invalid"
       ]
@@ -88,14 +89,15 @@ self_test_output="$(
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
   CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_GLOBAL_STATE" \
   CODEX_SELF_TEST_EXPECT_TITLE="Renamed example task" \
-  CODEX_SELF_TEST_EXPECT_UNREAD_ID="00000000-0000-0000-0000-000000000001" \
+  CODEX_SELF_TEST_EXPECT_UNREAD_ID="00000000-0000-0000-0000-000000000002" \
+  CODEX_SELF_TEST_EXPECT_READ_ID="00000000-0000-0000-0000-000000000001" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 after_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok usage=ok unread_state=ok"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok usage=ok unread_state=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
