@@ -8,6 +8,7 @@ BINARY="$APP_DIR/Contents/MacOS/Codex最近任务栏"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
+FIXTURE_GLOBAL_STATE="$FIXTURE_DIR/codex-global-state.json"
 FIXTURE_USAGE_SERVER="$FIXTURE_DIR/fake-codex"
 
 "$ROOT/scripts/build_app.sh"
@@ -52,6 +53,19 @@ cat > "$FIXTURE_INDEX" <<'JSONL'
 {"id":"partial"
 JSONL
 
+cat > "$FIXTURE_GLOBAL_STATE" <<'JSON'
+{
+  "electron-persisted-atom-state": {
+    "unread-thread-ids-by-host-v1": {
+      "local": [
+        "00000000-0000-0000-0000-000000000005",
+        "invalid"
+      ]
+    }
+  }
+}
+JSON
+
 cat > "$FIXTURE_USAGE_SERVER" <<'ZSH'
 #!/bin/zsh
 request_count=0
@@ -68,16 +82,20 @@ chmod +x "$FIXTURE_USAGE_SERVER"
 
 before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 before_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
+before_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 self_test_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
+  CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_GLOBAL_STATE" \
   CODEX_SELF_TEST_EXPECT_TITLE="Renamed example task" \
+  CODEX_SELF_TEST_EXPECT_UNREAD_ID="00000000-0000-0000-0000-000000000001" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 after_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
+after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok usage=ok"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok usage=ok unread_state=ok"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
@@ -110,14 +128,19 @@ set -e
   print -u2 "自检修改了固定任务备注索引"
   exit 7
 }
+[[ "$before_global_state_hash" == "$after_global_state_hash" ]] || {
+  print -u2 "自检修改了固定未读状态文件"
+  exit 11
+}
 
 fallback_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_DIR/missing-session-index.jsonl" \
+  CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_DIR/missing-global-state.json" \
   "$BINARY" --self-test
 )"
 [[ "$fallback_output" == *"SELF_TEST_OK count=3"* ]] || {
-  print -u2 "缺失任务备注索引回退测试失败：$fallback_output"
+  print -u2 "缺失任务备注索引或未读状态回退测试失败：$fallback_output"
   exit 8
 }
 

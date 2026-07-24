@@ -9,6 +9,7 @@ struct CodexTask: Decodable, Identifiable, Equatable {
     let cwd: String
     let gitBranch: String
     let updatedMillis: Int64
+    let hasUnreadUpdate: Bool
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -16,6 +17,32 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         case cwd
         case gitBranch = "git_branch"
         case updatedMillis = "updated_ms"
+    }
+
+    init(
+        id: String,
+        title: String,
+        cwd: String,
+        gitBranch: String,
+        updatedMillis: Int64,
+        hasUnreadUpdate: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.cwd = cwd
+        self.gitBranch = gitBranch
+        self.updatedMillis = updatedMillis
+        self.hasUnreadUpdate = hasUnreadUpdate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        gitBranch = try container.decode(String.self, forKey: .gitBranch)
+        updatedMillis = try container.decode(Int64.self, forKey: .updatedMillis)
+        hasUnreadUpdate = false
     }
 
     var deepLink: URL? {
@@ -40,7 +67,19 @@ struct CodexTask: Decodable, Identifiable, Equatable {
             title: newTitle,
             cwd: cwd,
             gitBranch: gitBranch,
-            updatedMillis: updatedMillis
+            updatedMillis: updatedMillis,
+            hasUnreadUpdate: hasUnreadUpdate
+        )
+    }
+
+    func replacingUnreadUpdate(with newValue: Bool) -> CodexTask {
+        CodexTask(
+            id: id,
+            title: title,
+            cwd: cwd,
+            gitBranch: gitBranch,
+            updatedMillis: updatedMillis,
+            hasUnreadUpdate: newValue
         )
     }
 }
@@ -52,6 +91,87 @@ private struct ThreadNameRecord: Decodable {
     enum CodingKeys: String, CodingKey {
         case id
         case threadName = "thread_name"
+    }
+}
+
+private struct ThreadSpawnEdgeRecord: Decodable {
+    let parentThreadID: String
+    let childThreadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case parentThreadID = "parent_thread_id"
+        case childThreadID = "child_thread_id"
+    }
+}
+
+private enum UnreadTaskStateRepository {
+    private static let persistedAtomsKey = "electron-persisted-atom-state"
+    private static let unreadThreadsKey = "unread-thread-ids-by-host-v1"
+    private static let maximumFileSize = 64 * 1024 * 1024
+
+    static func loadUnreadThreadIDs() -> Set<String> {
+        guard let url = currentGlobalStateURL(),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSize = attributes[.size] as? NSNumber,
+              fileSize.intValue <= maximumFileSize,
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return []
+        }
+        return unreadThreadIDs(from: data)
+    }
+
+    static func unreadThreadIDs(from data: Data) -> Set<String> {
+        guard data.count <= maximumFileSize,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let persistedAtoms = root[persistedAtomsKey] as? [String: Any],
+              let unreadThreadsByHost = persistedAtoms[unreadThreadsKey] as? [String: Any] else {
+            return []
+        }
+
+        var unreadThreadIDs = Set<String>()
+        for value in unreadThreadsByHost.values {
+            guard let threadIDs = value as? [Any] else { continue }
+            for case let threadID as String in threadIDs
+                where threadID.count <= 128 && UUID(uuidString: threadID) != nil {
+                unreadThreadIDs.insert(threadID)
+            }
+        }
+        return unreadThreadIDs
+    }
+
+    static func topLevelThreadIDs(
+        for unreadThreadIDs: Set<String>,
+        parentThreadIDsByChild: [String: String]
+    ) -> Set<String> {
+        Set(unreadThreadIDs.map { threadID in
+            var currentThreadID = threadID
+            var visitedThreadIDs = Set<String>()
+
+            // ponytail: 256 层足以覆盖真实任务树；若格式损坏形成环或超深链，停在最后一个安全节点。
+            for _ in 0..<256 {
+                guard visitedThreadIDs.insert(currentThreadID).inserted,
+                      let parentThreadID = parentThreadIDsByChild[currentThreadID],
+                      !parentThreadID.isEmpty else {
+                    break
+                }
+                currentThreadID = parentThreadID
+            }
+            return currentThreadID
+        })
+    }
+
+    private static func currentGlobalStateURL() -> URL? {
+        let fileManager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+
+        if let override = environment["CODEX_GLOBAL_STATE_OVERRIDE"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            return fileManager.fileExists(atPath: url.path) ? url : nil
+        }
+
+        let url = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/.codex-global-state.json")
+        return fileManager.fileExists(atPath: url.path) ? url : nil
     }
 }
 
@@ -112,6 +232,11 @@ struct TaskRepository {
     ORDER BY updated_ms DESC, id ASC;
     """
 
+    private static let spawnEdgeQuery = """
+    SELECT parent_thread_id, child_thread_id
+    FROM thread_spawn_edges;
+    """
+
     static func loadTasks() throws -> (databaseURL: URL, tasks: [CodexTask]) {
         let databaseURL = try currentDatabaseURL()
         let outputPipe = Pipe()
@@ -148,9 +273,19 @@ struct TaskRepository {
         do {
             let decodedTasks = data.isEmpty ? [] : try JSONDecoder().decode([CodexTask].self, from: data)
             let titleOverrides = loadLatestThreadNames()
+            let unreadThreadIDs = UnreadTaskStateRepository.loadUnreadThreadIDs()
+            let parentThreadIDsByChild = loadParentThreadIDs(from: databaseURL)
+            let topLevelUnreadThreadIDs = UnreadTaskStateRepository.topLevelThreadIDs(
+                for: unreadThreadIDs,
+                parentThreadIDsByChild: parentThreadIDsByChild
+            )
             let tasks = decodedTasks.map { task in
-                guard let title = titleOverrides[task.id] else { return task }
-                return task.replacingTitle(with: title)
+                let renamedTask = titleOverrides[task.id].map {
+                    task.replacingTitle(with: $0)
+                } ?? task
+                return renamedTask.replacingUnreadUpdate(
+                    with: topLevelUnreadThreadIDs.contains(task.id)
+                )
             }
             return (databaseURL, tasks)
         } catch {
@@ -180,6 +315,33 @@ struct TaskRepository {
         }
 
         return namesByID
+    }
+
+    private static func loadParentThreadIDs(from databaseURL: URL) -> [String: String] {
+        let outputPipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            "-readonly",
+            "-json",
+            "-cmd", ".timeout 800",
+            databaseURL.path,
+            spawnEdgeQuery,
+        ]
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+
+        guard (try? process.run()) != nil else { return [:] }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let edges = try? JSONDecoder().decode([ThreadSpawnEdgeRecord].self, from: data) else {
+            return [:]
+        }
+
+        return edges.reduce(into: [:]) { result, edge in
+            result[edge.childThreadID] = edge.parentThreadID
+        }
     }
 
     private static func currentSessionIndexURL() -> URL? {
@@ -496,6 +658,11 @@ final class TaskStore: ObservableObject {
                 $0.bundleIdentifier == "com.openai.codex"
             }) else { return }
             codex.activate(options: [.activateAllWindows])
+        }
+
+        // Codex 会在任务被打开后清除未读更新状态；稍后只读刷新，让绿色标识及时同步消失。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.refresh()
         }
     }
 }
@@ -845,6 +1012,7 @@ struct RecentTaskRowView: View {
     @State private var isHovering = false
 
     var body: some View {
+        let shortTime = TimeLabelFormatter.shortLabel(milliseconds: task.updatedMillis, now: now)
         Button(action: openTask) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "text.bubble")
@@ -860,14 +1028,35 @@ struct RecentTaskRowView: View {
 
                 Spacer(minLength: 6)
 
-                Text(TimeLabelFormatter.shortLabel(milliseconds: task.updatedMillis, now: now))
-                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.accentColor)
-                    .monospacedDigit()
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.11), in: Capsule())
+                if task.hasUnreadUpdate {
+                    HStack(spacing: 5) {
+                        Text(shortTime)
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+
+                        HStack(spacing: 3) {
+                            Image(systemName: "circle.fill")
+                                .font(.system(size: 7.5, weight: .semibold))
+                            Text("待查看")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.green)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.12), in: Capsule())
+                    }
                     .fixedSize()
+                } else {
+                    Text(shortTime)
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.accentColor)
+                        .monospacedDigit()
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.11), in: Capsule())
+                        .fixedSize()
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -876,8 +1065,8 @@ struct RecentTaskRowView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help("\(projectName)\n任务：\(task.title)\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))\nThread ID：\(task.id)")
-        .accessibilityLabel("\(projectName)，任务 \(task.title)，最近活动 \(TimeLabelFormatter.shortLabel(milliseconds: task.updatedMillis, now: now))")
+        .help("\(projectName)\n任务：\(task.title)\n状态：\(task.hasUnreadUpdate ? "有新回复（待查看）" : "暂无未读更新")\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))\nThread ID：\(task.id)")
+        .accessibilityLabel("\(projectName)，任务 \(task.title)，\(task.hasUnreadUpdate ? "有新回复，待查看" : "暂无未读更新")，最近活动 \(shortTime)")
         .accessibilityHint("打开这条 Codex 任务")
     }
 }
@@ -1568,6 +1757,16 @@ enum SelfTest {
                 }
                 titleOverrideStatus = " title_override=ok"
             }
+            var unreadOverrideStatus = ""
+            if let expectedUnreadID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_UNREAD_ID"] {
+                guard tasks.contains(where: {
+                    $0.id == expectedUnreadID && $0.hasUnreadUpdate
+                }) else {
+                    fputs("SELF_TEST_FAILED unread override\n", stderr)
+                    return 10
+                }
+                unreadOverrideStatus = " unread_override=ok"
+            }
             guard tasks.allSatisfy({ !$0.id.isEmpty && !$0.cwd.isEmpty && $0.updatedMillis > 0 && $0.deepLink != nil }) else {
                 fputs("SELF_TEST_FAILED invalid task fields\n", stderr)
                 return 3
@@ -1643,7 +1842,42 @@ enum SelfTest {
                 return 9
             }
 
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus) usage=ok database=\(result.databaseURL.path)")
+            let unreadFixture = Data("""
+            {
+              "electron-persisted-atom-state": {
+                "unread-thread-ids-by-host-v1": {
+                  "local": [
+                    "00000000-0000-0000-0000-000000000001",
+                    "invalid"
+                  ],
+                  "remote": [
+                    "00000000-0000-0000-0000-000000000002"
+                  ]
+                }
+              }
+            }
+            """.utf8)
+            guard UnreadTaskStateRepository.unreadThreadIDs(from: unreadFixture) == Set([
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            ]),
+            UnreadTaskStateRepository.unreadThreadIDs(from: Data("not json".utf8)).isEmpty else {
+                fputs("SELF_TEST_FAILED unread state parsing\n", stderr)
+                return 11
+            }
+            guard UnreadTaskStateRepository.topLevelThreadIDs(
+                for: ["00000000-0000-0000-0000-000000000003"],
+                parentThreadIDsByChild: [
+                    "00000000-0000-0000-0000-000000000003": "00000000-0000-0000-0000-000000000002",
+                    "00000000-0000-0000-0000-000000000002": "00000000-0000-0000-0000-000000000001",
+                ]
+            ) == ["00000000-0000-0000-0000-000000000001"] else {
+                fputs("SELF_TEST_FAILED unread parent mapping\n", stderr)
+                return 12
+            }
+
+            let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus) usage=ok unread_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
