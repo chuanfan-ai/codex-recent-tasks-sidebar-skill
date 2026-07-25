@@ -9,6 +9,8 @@ FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
 FIXTURE_GLOBAL_STATE="$FIXTURE_DIR/codex-global-state.json"
+FIXTURE_RUNNING_ROLLOUT="$FIXTURE_DIR/running-rollout.jsonl"
+FIXTURE_ACTION_ROLLOUT="$FIXTURE_DIR/action-rollout.jsonl"
 FIXTURE_USAGE_SERVER="$FIXTURE_DIR/fake-codex"
 
 "$ROOT/scripts/build_app.sh"
@@ -29,7 +31,8 @@ CREATE TABLE threads (
   archived INTEGER DEFAULT 0,
   thread_source TEXT,
   source TEXT,
-  agent_path TEXT
+  agent_path TEXT,
+  rollout_path TEXT
 );
 CREATE TABLE thread_spawn_edges (
   parent_thread_id TEXT NOT NULL,
@@ -37,11 +40,11 @@ CREATE TABLE thread_spawn_edges (
   status TEXT NOT NULL
 );
 INSERT INTO threads VALUES
-  ('00000000-0000-0000-0000-000000000001', 'Original example task', '/tmp/example-project-a', 'main', 4102444800000, 4102444800, 0, '', '', ''),
-  ('00000000-0000-0000-0000-000000000002', 'Second example task', '/tmp/example-project-b', '', 4102444700000, 4102444700, 0, '', '', ''),
-  ('00000000-0000-0000-0000-000000000003', 'Excluded internal agent task', '/tmp/example-project-a', '', 4102444600000, 4102444600, 0, 'subagent', '{"subagent":true}', '/tmp/agent'),
-  ('00000000-0000-0000-0000-000000000004', 'Recovered root task', '/tmp/example-project-a', '', 4102444500000, 4102444500, 0, 'subagent', '', ''),
-  ('00000000-0000-0000-0000-000000000005', 'Excluded child task', '/tmp/example-project-a', '', 4102444400000, 4102444400, 0, 'subagent', '', '');
+  ('00000000-0000-0000-0000-000000000001', 'Original example task', '/tmp/example-project-a', 'main', 4102444800000, 4102444800, 0, '', '', '', ''),
+  ('00000000-0000-0000-0000-000000000002', 'Second example task', '/tmp/example-project-b', '', 4102444700000, 4102444700, 0, '', '', '', ''),
+  ('00000000-0000-0000-0000-000000000003', 'Excluded internal agent task', '/tmp/example-project-a', '', 4102444600000, 4102444600, 0, 'subagent', '{"subagent":true}', '/tmp/agent', ''),
+  ('00000000-0000-0000-0000-000000000004', 'Recovered root task', '/tmp/example-project-a', '', 4102444500000, 4102444500, 0, 'subagent', '', '', ''),
+  ('00000000-0000-0000-0000-000000000005', 'Excluded child task', '/tmp/example-project-a', '', 4102444400000, 4102444400, 0, 'subagent', '', '', '');
 INSERT INTO thread_spawn_edges VALUES
   ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000005', 'running');
 SQL
@@ -67,6 +70,24 @@ cat > "$FIXTURE_GLOBAL_STATE" <<'JSON'
 }
 JSON
 
+cat > "$FIXTURE_RUNNING_ROLLOUT" <<'JSONL'
+{"type":"event_msg","payload":{"type":"task_complete"}}
+{"type":"event_msg","payload":{"type":"task_started"}}
+{"type":"response_item","payload":{"type":"message"}}
+JSONL
+
+cat > "$FIXTURE_ACTION_ROLLOUT" <<'JSONL'
+{"type":"event_msg","payload":{"type":"task_started"}}
+{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"call-1"}}
+JSONL
+
+/usr/bin/sqlite3 "$FIXTURE_DB" \
+  ".parameter init" \
+  ".parameter set @running \"$FIXTURE_RUNNING_ROLLOUT\"" \
+  ".parameter set @action \"$FIXTURE_ACTION_ROLLOUT\"" \
+  "UPDATE threads SET rollout_path=@running WHERE id='00000000-0000-0000-0000-000000000002';" \
+  "UPDATE threads SET rollout_path=@action WHERE id='00000000-0000-0000-0000-000000000001';"
+
 cat > "$FIXTURE_USAGE_SERVER" <<'ZSH'
 #!/bin/zsh
 request_count=0
@@ -84,20 +105,27 @@ chmod +x "$FIXTURE_USAGE_SERVER"
 before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 before_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 before_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
+before_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
+before_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 self_test_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
   CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_GLOBAL_STATE" \
+  CODEX_ROLLOUT_ROOT_OVERRIDE="$FIXTURE_DIR" \
   CODEX_SELF_TEST_EXPECT_TITLE="Renamed example task" \
   CODEX_SELF_TEST_EXPECT_UNREAD_ID="00000000-0000-0000-0000-000000000002" \
   CODEX_SELF_TEST_EXPECT_READ_ID="00000000-0000-0000-0000-000000000001" \
+  CODEX_SELF_TEST_EXPECT_RUNNING_ID="00000000-0000-0000-0000-000000000002" \
+  CODEX_SELF_TEST_EXPECT_ACTION_ID="00000000-0000-0000-0000-000000000001" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 after_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
+after_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
+after_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok usage=ok unread_state=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
@@ -133,6 +161,14 @@ set -e
 [[ "$before_global_state_hash" == "$after_global_state_hash" ]] || {
   print -u2 "自检修改了固定未读状态文件"
   exit 11
+}
+[[ "$before_running_rollout_hash" == "$after_running_rollout_hash" ]] || {
+  print -u2 "自检修改了固定运行中事件文件"
+  exit 12
+}
+[[ "$before_action_rollout_hash" == "$after_action_rollout_hash" ]] || {
+  print -u2 "自检修改了固定待操作事件文件"
+  exit 13
 }
 
 fallback_output="$(

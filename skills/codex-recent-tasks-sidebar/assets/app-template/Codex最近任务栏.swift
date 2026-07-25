@@ -3,13 +3,77 @@ import Darwin
 import Foundation
 import SwiftUI
 
+enum TaskRuntimeState: String, Equatable {
+    case unknown
+    case idle
+    case running
+    case needsAction
+}
+
+enum TaskDisplayState: Equatable {
+    case idle
+    case running
+    case needsAction
+    case needsReview
+
+    static func resolve(runtimeState: TaskRuntimeState, hasUnreadUpdate: Bool) -> TaskDisplayState {
+        switch runtimeState {
+        case .needsAction:
+            return .needsAction
+        case .running:
+            return .running
+        case .idle, .unknown:
+            return hasUnreadUpdate ? .needsReview : .idle
+        }
+    }
+
+    var badgeText: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .running:
+            return "运行中"
+        case .needsAction:
+            return "待操作"
+        case .needsReview:
+            return "待查看"
+        }
+    }
+
+    var statusDescription: String {
+        switch self {
+        case .idle:
+            return "暂无未读更新"
+        case .running:
+            return "任务正在运行"
+        case .needsAction:
+            return "任务正在等待操作"
+        case .needsReview:
+            return "有新回复（待查看）"
+        }
+    }
+
+    var tintColor: Color {
+        switch self {
+        case .idle, .running:
+            return .accentColor
+        case .needsAction:
+            return .orange
+        case .needsReview:
+            return .green
+        }
+    }
+}
+
 struct CodexTask: Decodable, Identifiable, Equatable {
     let id: String
     let title: String
     let cwd: String
     let gitBranch: String
     let updatedMillis: Int64
+    let rolloutPath: String
     let hasUnreadUpdate: Bool
+    let runtimeState: TaskRuntimeState
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -17,6 +81,7 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         case cwd
         case gitBranch = "git_branch"
         case updatedMillis = "updated_ms"
+        case rolloutPath = "rollout_path"
     }
 
     init(
@@ -25,14 +90,18 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         cwd: String,
         gitBranch: String,
         updatedMillis: Int64,
-        hasUnreadUpdate: Bool = false
+        rolloutPath: String = "",
+        hasUnreadUpdate: Bool = false,
+        runtimeState: TaskRuntimeState = .unknown
     ) {
         self.id = id
         self.title = title
         self.cwd = cwd
         self.gitBranch = gitBranch
         self.updatedMillis = updatedMillis
+        self.rolloutPath = rolloutPath
         self.hasUnreadUpdate = hasUnreadUpdate
+        self.runtimeState = runtimeState
     }
 
     init(from decoder: Decoder) throws {
@@ -42,7 +111,9 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         cwd = try container.decode(String.self, forKey: .cwd)
         gitBranch = try container.decode(String.self, forKey: .gitBranch)
         updatedMillis = try container.decode(Int64.self, forKey: .updatedMillis)
+        rolloutPath = try container.decodeIfPresent(String.self, forKey: .rolloutPath) ?? ""
         hasUnreadUpdate = false
+        runtimeState = .unknown
     }
 
     var deepLink: URL? {
@@ -61,6 +132,10 @@ struct CodexTask: Decodable, Identifiable, Equatable {
         return name.isEmpty ? "未归类" : name
     }
 
+    var displayState: TaskDisplayState {
+        TaskDisplayState.resolve(runtimeState: runtimeState, hasUnreadUpdate: hasUnreadUpdate)
+    }
+
     func replacingTitle(with newTitle: String) -> CodexTask {
         CodexTask(
             id: id,
@@ -68,7 +143,9 @@ struct CodexTask: Decodable, Identifiable, Equatable {
             cwd: cwd,
             gitBranch: gitBranch,
             updatedMillis: updatedMillis,
-            hasUnreadUpdate: hasUnreadUpdate
+            rolloutPath: rolloutPath,
+            hasUnreadUpdate: hasUnreadUpdate,
+            runtimeState: runtimeState
         )
     }
 
@@ -79,7 +156,22 @@ struct CodexTask: Decodable, Identifiable, Equatable {
             cwd: cwd,
             gitBranch: gitBranch,
             updatedMillis: updatedMillis,
-            hasUnreadUpdate: newValue
+            rolloutPath: rolloutPath,
+            hasUnreadUpdate: newValue,
+            runtimeState: runtimeState
+        )
+    }
+
+    func replacingRuntimeState(with newValue: TaskRuntimeState) -> CodexTask {
+        CodexTask(
+            id: id,
+            title: title,
+            cwd: cwd,
+            gitBranch: gitBranch,
+            updatedMillis: updatedMillis,
+            rolloutPath: rolloutPath,
+            hasUnreadUpdate: hasUnreadUpdate,
+            runtimeState: newValue
         )
     }
 }
@@ -144,6 +236,201 @@ private enum UnreadTaskStateRepository {
     }
 }
 
+private final class RolloutTaskStateRepository {
+    static let shared = RolloutTaskStateRepository()
+
+    private struct CacheEntry {
+        let fileSize: UInt64
+        let modificationDate: Date
+        let state: TaskRuntimeState
+    }
+
+    private struct ReverseScanContext {
+        var completedCallIDs = Set<String>()
+
+        mutating func consume(lineData: Data) -> TaskRuntimeState? {
+            guard !lineData.isEmpty,
+                  lineData.count <= 4 * 1024 * 1024,
+                  let record = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let recordType = record["type"] as? String,
+                  let payload = record["payload"] as? [String: Any],
+                  let payloadType = payload["type"] as? String else {
+                return nil
+            }
+
+            if recordType == "event_msg" {
+                switch payloadType {
+                case "task_complete", "turn_aborted":
+                    return .idle
+                case "task_started":
+                    return .running
+                case "thread/status/changed":
+                    guard let status = payload["status"] as? [String: Any],
+                          let statusType = status["type"] as? String else {
+                        return nil
+                    }
+                    if statusType == "idle" { return .idle }
+                    if statusType == "active" {
+                        let flags = status["activeFlags"] as? [String] ?? []
+                        return flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")
+                            ? .needsAction
+                            : .running
+                    }
+                default:
+                    break
+                }
+            }
+
+            if recordType == "response_item",
+               payloadType == "function_call_output" || payloadType == "custom_tool_call_output",
+               let callID = payload["call_id"] as? String {
+                completedCallIDs.insert(callID)
+                return nil
+            }
+
+            if recordType == "response_item",
+               payloadType == "function_call" || payloadType == "custom_tool_call",
+               let callID = payload["call_id"] as? String {
+                let alreadyCompleted = completedCallIDs.remove(callID) != nil
+                if !alreadyCompleted && Self.requiresUserAction(payload: payload) {
+                    return .needsAction
+                }
+            }
+
+            return nil
+        }
+
+        private static func requiresUserAction(payload: [String: Any]) -> Bool {
+            guard let name = payload["name"] as? String else { return false }
+            if name == "request_user_input" {
+                return true
+            }
+            guard name == "exec_command" || name == "exec",
+                  let rawArguments = (payload["arguments"] as? String) ?? (payload["input"] as? String),
+                  rawArguments.utf8.count <= 64 * 1024,
+                  let data = rawArguments.data(using: .utf8),
+                  let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return false
+            }
+            return arguments["sandbox_permissions"] as? String == "require_escalated"
+        }
+    }
+
+    private let lock = NSLock()
+    private var cache: [String: CacheEntry] = [:]
+
+    func loadState(rolloutPath: String) -> TaskRuntimeState {
+        guard let url = validatedRolloutURL(for: rolloutPath),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSizeNumber = attributes[.size] as? NSNumber,
+              let modificationDate = attributes[.modificationDate] as? Date else {
+            return .unknown
+        }
+
+        let fileSize = fileSizeNumber.uint64Value
+        guard fileSize > 0, fileSize <= 512 * 1024 * 1024 else {
+            return .unknown
+        }
+
+        lock.lock()
+        let cached = cache[url.path]
+        lock.unlock()
+        if let cached,
+           cached.fileSize == fileSize,
+           cached.modificationDate == modificationDate {
+            return cached.state
+        }
+
+        let state = scanState(at: url, fileSize: fileSize)
+        lock.lock()
+        cache[url.path] = CacheEntry(
+            fileSize: fileSize,
+            modificationDate: modificationDate,
+            state: state
+        )
+        lock.unlock()
+        return state
+    }
+
+    static func state(from data: Data) -> TaskRuntimeState {
+        var context = ReverseScanContext()
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
+            if let state = context.consume(lineData: Data(line)) {
+                return state
+            }
+        }
+        return .unknown
+    }
+
+    private func scanState(at url: URL, fileSize: UInt64) -> TaskRuntimeState {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return .unknown
+        }
+        defer { try? handle.close() }
+
+        let chunkSize: UInt64 = 64 * 1024
+        let maximumBytesToScan: UInt64 = 64 * 1024 * 1024
+        var remainingOffset = fileSize
+        var scannedBytes: UInt64 = 0
+        var carry = Data()
+        var context = ReverseScanContext()
+
+        // ponytail: 最多倒查 64 MB，覆盖正常单轮任务；若未来出现超大单轮，再改为增量事件索引。
+        while remainingOffset > 0 && scannedBytes < maximumBytesToScan {
+            let readLength = min(chunkSize, remainingOffset, maximumBytesToScan - scannedBytes)
+            let readOffset = remainingOffset - readLength
+            do {
+                try handle.seek(toOffset: readOffset)
+            } catch {
+                return .unknown
+            }
+            let chunk = handle.readData(ofLength: Int(readLength))
+            guard !chunk.isEmpty else { return .unknown }
+
+            var combined = chunk
+            combined.append(carry)
+            let lines = combined.split(separator: 0x0A, omittingEmptySubsequences: false)
+            let firstCompleteIndex = readOffset == 0 ? 0 : 1
+            if lines.count > firstCompleteIndex {
+                for index in stride(from: lines.count - 1, through: firstCompleteIndex, by: -1) {
+                    if let state = context.consume(lineData: Data(lines[index])) {
+                        return state
+                    }
+                }
+            }
+
+            carry = lines.first.map { Data($0) } ?? Data()
+            remainingOffset = readOffset
+            scannedBytes += readLength
+        }
+
+        return .unknown
+    }
+
+    private func validatedRolloutURL(for rolloutPath: String) -> URL? {
+        guard !rolloutPath.isEmpty, rolloutPath.utf8.count <= 4_096 else { return nil }
+        let fileManager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+        let rootURL: URL
+        if let override = environment["CODEX_ROLLOUT_ROOT_OVERRIDE"], !override.isEmpty {
+            rootURL = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            rootURL = fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/sessions", isDirectory: true)
+        }
+
+        let resolvedRoot = rootURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedURL = URL(fileURLWithPath: rolloutPath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard resolvedURL.path.hasPrefix(resolvedRoot + "/"),
+              fileManager.isReadableFile(atPath: resolvedURL.path) else {
+            return nil
+        }
+        return resolvedURL
+    }
+}
+
 struct TaskGroup: Identifiable {
     let id: String
     let name: String
@@ -188,7 +475,8 @@ struct TaskRepository {
       CASE WHEN trim(title) = '' THEN '未命名任务' ELSE substr(title, 1, 240) END AS title,
       cwd,
       COALESCE(git_branch, '') AS git_branch,
-      CAST(COALESCE(NULLIF(updated_at_ms, 0), updated_at * 1000) AS INTEGER) AS updated_ms
+      CAST(COALESCE(NULLIF(updated_at_ms, 0), updated_at * 1000) AS INTEGER) AS updated_ms,
+      COALESCE(rollout_path, '') AS rollout_path
     FROM threads AS task
     WHERE archived = 0
       AND COALESCE(source, '') NOT LIKE '{"subagent"%'
@@ -238,13 +526,20 @@ struct TaskRepository {
             let decodedTasks = data.isEmpty ? [] : try JSONDecoder().decode([CodexTask].self, from: data)
             let titleOverrides = loadLatestThreadNames()
             let unreadThreadIDs = UnreadTaskStateRepository.loadUnreadThreadIDs()
+            let now = Date()
             let tasks = decodedTasks.map { task in
                 let renamedTask = titleOverrides[task.id].map {
                     task.replacingTitle(with: $0)
                 } ?? task
                 // Codex 按当前任务 ID 标记和清除未读。内部子线程的残留未读不能抬升为顶层任务未读。
-                return renamedTask.replacingUnreadUpdate(
+                let unreadTask = renamedTask.replacingUnreadUpdate(
                     with: unreadThreadIDs.contains(task.id)
+                )
+                guard RecentTaskPolicy.includes(unreadTask, now: now) else {
+                    return unreadTask
+                }
+                return unreadTask.replacingRuntimeState(
+                    with: RolloutTaskStateRepository.shared.loadState(rolloutPath: unreadTask.rolloutPath)
                 )
             }
             return (databaseURL, tasks)
@@ -520,6 +815,7 @@ final class TaskStore: ObservableObject {
     @Published private(set) var now = Date()
 
     private var refreshTimer: Timer?
+    private var runtimeRefreshTimer: Timer?
 
     init() {
         refresh()
@@ -528,10 +824,16 @@ final class TaskStore: ObservableObject {
                 self?.refresh()
             }
         }
+        runtimeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshRuntimeStates()
+            }
+        }
     }
 
     deinit {
         refreshTimer?.invalidate()
+        runtimeRefreshTimer?.invalidate()
     }
 
     func refresh() {
@@ -544,6 +846,18 @@ final class TaskStore: ObservableObject {
             lastRefresh = Date()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func refreshRuntimeStates() {
+        now = Date()
+        let refreshedTasks = tasks.map { task in
+            guard RecentTaskPolicy.includes(task, now: now) else { return task }
+            let state = RolloutTaskStateRepository.shared.loadState(rolloutPath: task.rolloutPath)
+            return task.replacingRuntimeState(with: state)
+        }
+        if refreshedTasks != tasks {
+            tasks = refreshedTasks
         }
     }
 
@@ -946,6 +1260,7 @@ struct RecentTaskRowView: View {
 
     var body: some View {
         let shortTime = TimeLabelFormatter.shortLabel(milliseconds: task.updatedMillis, now: now)
+        let displayState = task.displayState
         Button(action: openTask) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "text.bubble")
@@ -961,7 +1276,7 @@ struct RecentTaskRowView: View {
 
                 Spacer(minLength: 6)
 
-                if task.hasUnreadUpdate {
+                if let badgeText = displayState.badgeText {
                     HStack(spacing: 5) {
                         Text(shortTime)
                             .font(.system(size: 10.5, weight: .medium, design: .rounded))
@@ -971,13 +1286,13 @@ struct RecentTaskRowView: View {
                         HStack(spacing: 3) {
                             Image(systemName: "circle.fill")
                                 .font(.system(size: 7.5, weight: .semibold))
-                            Text("待查看")
+                            Text(badgeText)
                                 .font(.system(size: 10.5, weight: .semibold))
                         }
-                        .foregroundStyle(Color.green)
+                        .foregroundStyle(displayState.tintColor)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
-                        .background(Color.green.opacity(0.12), in: Capsule())
+                        .background(displayState.tintColor.opacity(0.12), in: Capsule())
                     }
                     .fixedSize()
                 } else {
@@ -998,8 +1313,8 @@ struct RecentTaskRowView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help("\(projectName)\n任务：\(task.title)\n状态：\(task.hasUnreadUpdate ? "有新回复（待查看）" : "暂无未读更新")\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))\nThread ID：\(task.id)")
-        .accessibilityLabel("\(projectName)，任务 \(task.title)，\(task.hasUnreadUpdate ? "有新回复，待查看" : "暂无未读更新")，最近活动 \(shortTime)")
+        .help("\(projectName)\n任务：\(task.title)\n状态：\(displayState.statusDescription)\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))\nThread ID：\(task.id)")
+        .accessibilityLabel("\(projectName)，任务 \(task.title)，\(displayState.statusDescription)，最近活动 \(shortTime)")
         .accessibilityHint("打开这条 Codex 任务")
     }
 }
@@ -1710,6 +2025,30 @@ enum SelfTest {
                 }
                 readOverrideStatus = " read_override=ok"
             }
+            var runtimeOverrideStatus = ""
+            if let expectedRunningID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_RUNNING_ID"] {
+                guard tasks.contains(where: {
+                    $0.id == expectedRunningID
+                        && $0.runtimeState == .running
+                        && $0.displayState == .running
+                }) else {
+                    fputs("SELF_TEST_FAILED runtime override\n", stderr)
+                    return 13
+                }
+                runtimeOverrideStatus = " runtime_override=ok"
+            }
+            var actionOverrideStatus = ""
+            if let expectedActionID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_ACTION_ID"] {
+                guard tasks.contains(where: {
+                    $0.id == expectedActionID
+                        && $0.runtimeState == .needsAction
+                        && $0.displayState == .needsAction
+                }) else {
+                    fputs("SELF_TEST_FAILED action override\n", stderr)
+                    return 14
+                }
+                actionOverrideStatus = " action_override=ok"
+            }
             guard tasks.allSatisfy({ !$0.id.isEmpty && !$0.cwd.isEmpty && $0.updatedMillis > 0 && $0.deepLink != nil }) else {
                 fputs("SELF_TEST_FAILED invalid task fields\n", stderr)
                 return 3
@@ -1808,8 +2147,55 @@ enum SelfTest {
                 fputs("SELF_TEST_FAILED unread state parsing\n", stderr)
                 return 11
             }
+
+            let runningFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_complete"}}
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"response_item","payload":{"type":"message"}}
+            """.utf8)
+            let completedFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"event_msg","payload":{"type":"task_complete"}}
+            """.utf8)
+            let abortedFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"event_msg","payload":{"type":"turn_aborted"}}
+            """.utf8)
+            let actionFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"call-1"}}
+            """.utf8)
+            let resumedFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"call-1"}}
+            {"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1"}}
+            """.utf8)
+            let approvalFixture = Data("""
+            {"type":"event_msg","payload":{"type":"task_started"}}
+            {"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-2","arguments":"{\\"sandbox_permissions\\":\\"require_escalated\\"}"}}
+            """.utf8)
+            guard RolloutTaskStateRepository.state(from: runningFixture) == .running,
+                  RolloutTaskStateRepository.state(from: completedFixture) == .idle,
+                  RolloutTaskStateRepository.state(from: abortedFixture) == .idle,
+                  RolloutTaskStateRepository.state(from: actionFixture) == .needsAction,
+                  RolloutTaskStateRepository.state(from: resumedFixture) == .running,
+                  RolloutTaskStateRepository.state(from: approvalFixture) == .needsAction,
+                  RolloutTaskStateRepository.state(from: Data("not json".utf8)) == .unknown else {
+                fputs("SELF_TEST_FAILED runtime state parsing\n", stderr)
+                return 15
+            }
+
+            guard TaskDisplayState.resolve(runtimeState: .running, hasUnreadUpdate: true) == .running,
+                  TaskDisplayState.resolve(runtimeState: .needsAction, hasUnreadUpdate: true) == .needsAction,
+                  TaskDisplayState.resolve(runtimeState: .idle, hasUnreadUpdate: true) == .needsReview,
+                  TaskDisplayState.resolve(runtimeState: .idle, hasUnreadUpdate: false) == .idle,
+                  TaskDisplayState.resolve(runtimeState: .unknown, hasUnreadUpdate: true) == .needsReview else {
+                fputs("SELF_TEST_FAILED display state priority\n", stderr)
+                return 16
+            }
+
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus) usage=ok unread_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
