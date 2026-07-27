@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import SwiftUI
 
-enum TaskRuntimeState: String, Equatable {
+enum TaskRuntimeState: String, Equatable, Sendable {
     case unknown
     case idle
     case running
@@ -65,7 +65,7 @@ enum TaskDisplayState: Equatable {
     }
 }
 
-struct CodexTask: Decodable, Identifiable, Equatable {
+struct CodexTask: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let cwd: String
@@ -236,88 +236,195 @@ private enum UnreadTaskStateRepository {
     }
 }
 
-private final class RolloutTaskStateRepository {
+private final class RolloutTaskStateRepository: @unchecked Sendable {
     static let shared = RolloutTaskStateRepository()
 
     private struct CacheEntry {
         let fileSize: UInt64
         let modificationDate: Date
         let state: TaskRuntimeState
+        let pendingActionCallIDs: Set<String>
+        let canAdvanceIncrementally: Bool
+    }
+
+    private struct StateRecord {
+        let recordType: String
+        let payloadType: String
+        let payload: [String: Any]
+    }
+
+    private struct StateSnapshot {
+        let state: TaskRuntimeState
+        let pendingActionCallIDs: Set<String>
+        let canAdvanceIncrementally: Bool
+        let scannedBytes: UInt64
+    }
+
+    struct Diagnostics {
+        let fullScanCount: Int
+        let incrementalScanCount: Int
+        let fullScanBytes: UInt64
+        let incrementalScanBytes: UInt64
     }
 
     private struct ReverseScanContext {
         var completedCallIDs = Set<String>()
 
-        mutating func consume(lineData: Data) -> TaskRuntimeState? {
-            guard !lineData.isEmpty,
-                  lineData.count <= 4 * 1024 * 1024,
-                  let record = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let recordType = record["type"] as? String,
-                  let payload = record["payload"] as? [String: Any],
-                  let payloadType = payload["type"] as? String else {
+        mutating func consume(lineData: Data) -> StateSnapshot? {
+            guard let record = RolloutTaskStateRepository.stateRecord(from: lineData) else {
                 return nil
             }
 
-            if recordType == "event_msg" {
-                switch payloadType {
+            if record.recordType == "event_msg" {
+                switch record.payloadType {
                 case "task_complete", "turn_aborted":
-                    return .idle
+                    return StateSnapshot(
+                        state: .idle,
+                        pendingActionCallIDs: [],
+                        canAdvanceIncrementally: true,
+                        scannedBytes: 0
+                    )
                 case "task_started":
-                    return .running
+                    return StateSnapshot(
+                        state: .running,
+                        pendingActionCallIDs: [],
+                        canAdvanceIncrementally: true,
+                        scannedBytes: 0
+                    )
                 case "thread/status/changed":
-                    guard let status = payload["status"] as? [String: Any],
+                    guard let status = record.payload["status"] as? [String: Any],
                           let statusType = status["type"] as? String else {
                         return nil
                     }
-                    if statusType == "idle" { return .idle }
+                    if statusType == "idle" {
+                        return StateSnapshot(
+                            state: .idle,
+                            pendingActionCallIDs: [],
+                            canAdvanceIncrementally: true,
+                            scannedBytes: 0
+                        )
+                    }
                     if statusType == "active" {
                         let flags = status["activeFlags"] as? [String] ?? []
-                        return flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")
-                            ? .needsAction
-                            : .running
+                        let state: TaskRuntimeState =
+                            flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")
+                            ? .needsAction : .running
+                        return StateSnapshot(
+                            state: state,
+                            pendingActionCallIDs: [],
+                            canAdvanceIncrementally: true,
+                            scannedBytes: 0
+                        )
                     }
                 default:
                     break
                 }
             }
 
-            if recordType == "response_item",
-               payloadType == "function_call_output" || payloadType == "custom_tool_call_output",
-               let callID = payload["call_id"] as? String {
+            if record.recordType == "response_item",
+               record.payloadType == "function_call_output"
+                    || record.payloadType == "custom_tool_call_output",
+               let callID = record.payload["call_id"] as? String {
                 completedCallIDs.insert(callID)
                 return nil
             }
 
-            if recordType == "response_item",
-               payloadType == "function_call" || payloadType == "custom_tool_call",
-               let callID = payload["call_id"] as? String {
+            if record.recordType == "response_item",
+               record.payloadType == "function_call"
+                    || record.payloadType == "custom_tool_call",
+               let callID = record.payload["call_id"] as? String {
                 let alreadyCompleted = completedCallIDs.remove(callID) != nil
-                if !alreadyCompleted && Self.requiresUserAction(payload: payload) {
-                    return .needsAction
+                if !alreadyCompleted,
+                   RolloutTaskStateRepository.requiresUserAction(payload: record.payload) {
+                    return StateSnapshot(
+                        state: .needsAction,
+                        pendingActionCallIDs: [callID],
+                        canAdvanceIncrementally: true,
+                        scannedBytes: 0
+                    )
                 }
             }
 
             return nil
         }
+    }
 
-        private static func requiresUserAction(payload: [String: Any]) -> Bool {
-            guard let name = payload["name"] as? String else { return false }
-            if name == "request_user_input" {
-                return true
+    private struct ForwardScanContext {
+        var state: TaskRuntimeState
+        var pendingActionCallIDs: Set<String>
+
+        mutating func consume(lineData: Data) {
+            guard let record = RolloutTaskStateRepository.stateRecord(from: lineData) else {
+                return
             }
-            guard name == "exec_command" || name == "exec",
-                  let rawArguments = (payload["arguments"] as? String) ?? (payload["input"] as? String),
-                  rawArguments.utf8.count <= 64 * 1024,
-                  let data = rawArguments.data(using: .utf8),
-                  let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return false
+
+            if record.recordType == "event_msg" {
+                switch record.payloadType {
+                case "task_complete", "turn_aborted":
+                    state = .idle
+                    pendingActionCallIDs.removeAll()
+                case "task_started":
+                    state = .running
+                    pendingActionCallIDs.removeAll()
+                case "thread/status/changed":
+                    guard let status = record.payload["status"] as? [String: Any],
+                          let statusType = status["type"] as? String else {
+                        return
+                    }
+                    if statusType == "idle" {
+                        state = .idle
+                        pendingActionCallIDs.removeAll()
+                    } else if statusType == "active" {
+                        let flags = status["activeFlags"] as? [String] ?? []
+                        state = flags.contains("waitingOnApproval")
+                            || flags.contains("waitingOnUserInput")
+                            ? .needsAction : .running
+                        if state != .needsAction {
+                            pendingActionCallIDs.removeAll()
+                        }
+                    }
+                default:
+                    break
+                }
+                return
             }
-            return arguments["sandbox_permissions"] as? String == "require_escalated"
+
+            guard record.recordType == "response_item",
+                  let callID = record.payload["call_id"] as? String else {
+                return
+            }
+            if record.payloadType == "function_call"
+                || record.payloadType == "custom_tool_call" {
+                if RolloutTaskStateRepository.requiresUserAction(payload: record.payload) {
+                    pendingActionCallIDs.insert(callID)
+                    state = .needsAction
+                }
+            } else if record.payloadType == "function_call_output"
+                        || record.payloadType == "custom_tool_call_output",
+                      pendingActionCallIDs.remove(callID) != nil,
+                      pendingActionCallIDs.isEmpty {
+                state = .running
+            }
         }
     }
 
+    private static let relevantTokens = [
+        "task_started",
+        "task_complete",
+        "turn_aborted",
+        "thread/status/changed",
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+    ].map { Data($0.utf8) }
+
     private let lock = NSLock()
     private var cache: [String: CacheEntry] = [:]
+    private var fullScanCount = 0
+    private var incrementalScanCount = 0
+    private var fullScanBytes: UInt64 = 0
+    private var incrementalScanBytes: UInt64 = 0
 
     func loadState(rolloutPath: String) -> TaskRuntimeState {
         guard let url = validatedRolloutURL(for: rolloutPath),
@@ -341,34 +448,148 @@ private final class RolloutTaskStateRepository {
             return cached.state
         }
 
-        let state = scanState(at: url, fileSize: fileSize)
+        if let cached,
+           cached.canAdvanceIncrementally,
+           fileSize > cached.fileSize,
+           fileSize - cached.fileSize <= 16 * 1024 * 1024 {
+            guard fileEndsWithNewline(at: url, fileSize: fileSize),
+                  let snapshot = scanAppendedState(
+                      at: url,
+                      fromOffset: cached.fileSize,
+                      fileSize: fileSize,
+                      initialState: cached.state,
+                      pendingActionCallIDs: cached.pendingActionCallIDs
+                  ) else {
+                return cached.state
+            }
+            lock.lock()
+            cache[url.path] = CacheEntry(
+                fileSize: fileSize,
+                modificationDate: modificationDate,
+                state: snapshot.state,
+                pendingActionCallIDs: snapshot.pendingActionCallIDs,
+                canAdvanceIncrementally: snapshot.canAdvanceIncrementally
+            )
+            incrementalScanCount += 1
+            incrementalScanBytes += snapshot.scannedBytes
+            lock.unlock()
+            return snapshot.state
+        }
+
+        let snapshot = scanState(at: url, fileSize: fileSize)
         lock.lock()
         cache[url.path] = CacheEntry(
             fileSize: fileSize,
             modificationDate: modificationDate,
-            state: state
+            state: snapshot.state,
+            pendingActionCallIDs: snapshot.pendingActionCallIDs,
+            canAdvanceIncrementally: snapshot.canAdvanceIncrementally
         )
+        fullScanCount += 1
+        fullScanBytes += snapshot.scannedBytes
         lock.unlock()
-        return state
+        return snapshot.state
     }
 
     static func state(from data: Data) -> TaskRuntimeState {
         var context = ReverseScanContext()
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
-            if let state = context.consume(lineData: Data(line)) {
-                return state
+            if let snapshot = context.consume(lineData: Data(line)) {
+                return snapshot.state
             }
         }
         return .unknown
     }
 
-    private func scanState(at url: URL, fileSize: UInt64) -> TaskRuntimeState {
+    func diagnosticsSnapshot() -> Diagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return Diagnostics(
+            fullScanCount: fullScanCount,
+            incrementalScanCount: incrementalScanCount,
+            fullScanBytes: fullScanBytes,
+            incrementalScanBytes: incrementalScanBytes
+        )
+    }
+
+    private static func stateRecord(from lineData: Data) -> StateRecord? {
+        guard !lineData.isEmpty,
+              lineData.count <= 4 * 1024 * 1024,
+              relevantTokens.contains(where: { lineData.range(of: $0) != nil }),
+              let record = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+              let recordType = record["type"] as? String,
+              let payload = record["payload"] as? [String: Any],
+              let payloadType = payload["type"] as? String else {
+            return nil
+        }
+        return StateRecord(recordType: recordType, payloadType: payloadType, payload: payload)
+    }
+
+    private static func requiresUserAction(payload: [String: Any]) -> Bool {
+        guard let name = payload["name"] as? String else { return false }
+        if name == "request_user_input" {
+            return true
+        }
+        guard name == "exec_command" || name == "exec",
+              let rawArguments = (payload["arguments"] as? String) ?? (payload["input"] as? String),
+              rawArguments.utf8.count <= 64 * 1024,
+              let data = rawArguments.data(using: .utf8),
+              let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return arguments["sandbox_permissions"] as? String == "require_escalated"
+    }
+
+    private func scanAppendedState(
+        at url: URL,
+        fromOffset: UInt64,
+        fileSize: UInt64,
+        initialState: TaskRuntimeState,
+        pendingActionCallIDs: Set<String>
+    ) -> StateSnapshot? {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return .unknown
+            return nil
+        }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: fromOffset)
+        } catch {
+            return nil
+        }
+
+        let expectedLength = fileSize - fromOffset
+        let data = handle.readDataToEndOfFile()
+        guard data.count == Int(expectedLength) else {
+            return nil
+        }
+
+        var context = ForwardScanContext(
+            state: initialState,
+            pendingActionCallIDs: pendingActionCallIDs
+        )
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            context.consume(lineData: Data(line))
+        }
+        return StateSnapshot(
+            state: context.state,
+            pendingActionCallIDs: context.pendingActionCallIDs,
+            canAdvanceIncrementally: true,
+            scannedBytes: expectedLength
+        )
+    }
+
+    private func scanState(at url: URL, fileSize: UInt64) -> StateSnapshot {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return StateSnapshot(
+                state: .unknown,
+                pendingActionCallIDs: [],
+                canAdvanceIncrementally: false,
+                scannedBytes: 0
+            )
         }
         defer { try? handle.close() }
 
-        let chunkSize: UInt64 = 64 * 1024
+        var chunkSize: UInt64 = 256 * 1024
         let maximumBytesToScan: UInt64 = 64 * 1024 * 1024
         var remainingOffset = fileSize
         var scannedBytes: UInt64 = 0
@@ -382,10 +603,22 @@ private final class RolloutTaskStateRepository {
             do {
                 try handle.seek(toOffset: readOffset)
             } catch {
-                return .unknown
+                return StateSnapshot(
+                    state: .unknown,
+                    pendingActionCallIDs: [],
+                    canAdvanceIncrementally: false,
+                    scannedBytes: scannedBytes
+                )
             }
             let chunk = handle.readData(ofLength: Int(readLength))
-            guard !chunk.isEmpty else { return .unknown }
+            guard !chunk.isEmpty else {
+                return StateSnapshot(
+                    state: .unknown,
+                    pendingActionCallIDs: [],
+                    canAdvanceIncrementally: false,
+                    scannedBytes: scannedBytes
+                )
+            }
 
             var combined = chunk
             combined.append(carry)
@@ -393,8 +626,18 @@ private final class RolloutTaskStateRepository {
             let firstCompleteIndex = readOffset == 0 ? 0 : 1
             if lines.count > firstCompleteIndex {
                 for index in stride(from: lines.count - 1, through: firstCompleteIndex, by: -1) {
-                    if let state = context.consume(lineData: Data(lines[index])) {
-                        return state
+                    if var snapshot = context.consume(lineData: Data(lines[index])) {
+                        scannedBytes += readLength
+                        snapshot = StateSnapshot(
+                            state: snapshot.state,
+                            pendingActionCallIDs: snapshot.pendingActionCallIDs,
+                            canAdvanceIncrementally: fileEndsWithNewline(
+                                handle: handle,
+                                fileSize: fileSize
+                            ),
+                            scannedBytes: scannedBytes
+                        )
+                        return snapshot
                     }
                 }
             }
@@ -402,9 +645,32 @@ private final class RolloutTaskStateRepository {
             carry = lines.first.map { Data($0) } ?? Data()
             remainingOffset = readOffset
             scannedBytes += readLength
+            chunkSize = min(chunkSize * 2, 8 * 1024 * 1024)
         }
 
-        return .unknown
+        return StateSnapshot(
+            state: .unknown,
+            pendingActionCallIDs: [],
+            canAdvanceIncrementally: fileEndsWithNewline(handle: handle, fileSize: fileSize),
+            scannedBytes: scannedBytes
+        )
+    }
+
+    private func fileEndsWithNewline(handle: FileHandle, fileSize: UInt64) -> Bool {
+        guard fileSize > 0 else { return false }
+        do {
+            try handle.seek(toOffset: fileSize - 1)
+        } catch {
+            return false
+        }
+        return handle.readData(ofLength: 1).first == 0x0A
+    }
+
+    private func fileEndsWithNewline(at url: URL, fileSize: UInt64) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        // ponytail: Codex 正在写半行时先沿用缓存，下次刷新再读取，避免为瞬时半行退化成全量扫描。
+        return fileEndsWithNewline(handle: handle, fileSize: fileSize)
     }
 
     private func validatedRolloutURL(for rolloutPath: String) -> URL? {
@@ -816,6 +1082,13 @@ final class TaskStore: ObservableObject {
 
     private var refreshTimer: Timer?
     private var runtimeRefreshTimer: Timer?
+    private let refreshQueue = DispatchQueue(
+        label: "io.github.codexrecenttasks.refresh",
+        qos: .utility
+    )
+    private var isFullRefreshInFlight = false
+    private var fullRefreshRequestedAgain = false
+    private var isRuntimeRefreshInFlight = false
 
     init() {
         refresh()
@@ -824,11 +1097,13 @@ final class TaskStore: ObservableObject {
                 self?.refresh()
             }
         }
+        refreshTimer?.tolerance = 3
         runtimeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshRuntimeStates()
             }
         }
+        runtimeRefreshTimer?.tolerance = 1
     }
 
     deinit {
@@ -838,26 +1113,72 @@ final class TaskStore: ObservableObject {
 
     func refresh() {
         now = Date()
-        do {
-            let result = try TaskRepository.loadTasks()
-            tasks = result.tasks
-            databasePath = result.databaseURL.path
-            errorMessage = nil
-            lastRefresh = Date()
-        } catch {
-            errorMessage = error.localizedDescription
+        guard !isFullRefreshInFlight else {
+            fullRefreshRequestedAgain = true
+            return
+        }
+        isFullRefreshInFlight = true
+
+        refreshQueue.async {
+            let result: Result<(databaseURL: URL, tasks: [CodexTask]), Error> = Result {
+                try TaskRepository.loadTasks()
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isFullRefreshInFlight = false
+                switch result {
+                case let .success(loaded):
+                    if self.tasks != loaded.tasks {
+                        self.tasks = loaded.tasks
+                    }
+                    self.databasePath = loaded.databaseURL.path
+                    self.errorMessage = nil
+                    self.lastRefresh = Date()
+                case let .failure(error):
+                    self.errorMessage = error.localizedDescription
+                }
+                if self.fullRefreshRequestedAgain {
+                    self.fullRefreshRequestedAgain = false
+                    self.refresh()
+                }
+            }
         }
     }
 
     func refreshRuntimeStates() {
         now = Date()
-        let refreshedTasks = tasks.map { task in
-            guard RecentTaskPolicy.includes(task, now: now) else { return task }
-            let state = RolloutTaskStateRepository.shared.loadState(rolloutPath: task.rolloutPath)
-            return task.replacingRuntimeState(with: state)
-        }
-        if refreshedTasks != tasks {
-            tasks = refreshedTasks
+        guard !isRuntimeRefreshInFlight else { return }
+        let referenceNow = now
+        let taskSnapshot = tasks.filter { RecentTaskPolicy.includes($0, now: referenceNow) }
+        guard !taskSnapshot.isEmpty else { return }
+        isRuntimeRefreshInFlight = true
+
+        refreshQueue.async {
+            let updates = taskSnapshot.map { task in
+                (
+                    id: task.id,
+                    rolloutPath: task.rolloutPath,
+                    state: RolloutTaskStateRepository.shared.loadState(
+                        rolloutPath: task.rolloutPath
+                    )
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isRuntimeRefreshInFlight = false
+                let updatesByID = Dictionary(uniqueKeysWithValues: updates.map { ($0.id, $0) })
+                let refreshedTasks = self.tasks.map { task in
+                    guard let update = updatesByID[task.id],
+                          update.rolloutPath == task.rolloutPath,
+                          update.state != task.runtimeState else {
+                        return task
+                    }
+                    return task.replacingRuntimeState(with: update.state)
+                }
+                if refreshedTasks != self.tasks {
+                    self.tasks = refreshedTasks
+                }
+            }
         }
     }
 
@@ -914,7 +1235,7 @@ final class TaskStore: ObservableObject {
     }
 }
 
-struct UsageWindowDisplay: Identifiable, Equatable {
+struct UsageWindowDisplay: Identifiable, Equatable, Sendable {
     let label: String
     let remainingPercent: Int
 
@@ -923,7 +1244,7 @@ struct UsageWindowDisplay: Identifiable, Equatable {
 
 enum UsageState: Equatable {
     case loading
-    case available([UsageWindowDisplay])
+    case available([UsageWindowDisplay], isStale: Bool)
     case unavailable(String)
 }
 
@@ -985,8 +1306,8 @@ enum UsageSnapshotParser {
     }
 }
 
-final class CodexUsageClient {
-    typealias Completion = (Result<[UsageWindowDisplay], Error>) -> Void
+final class CodexUsageClient: @unchecked Sendable {
+    typealias Completion = @Sendable (Result<[UsageWindowDisplay], Error>) -> Void
 
     private let queue = DispatchQueue(label: "io.github.codexrecenttasks.usage")
     private var process: Process?
@@ -1020,6 +1341,14 @@ final class CodexUsageClient {
         }
     }
 
+    func reset() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            shutdown()
+            pendingCompletions.removeAll()
+        }
+    }
+
     private func start() {
         do {
             let executableURL = try Self.executableURL()
@@ -1033,7 +1362,8 @@ final class CodexUsageClient {
             process.standardOutput = outputPipe
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { [weak self] terminatedProcess in
-                self?.queue.async {
+                guard let self else { return }
+                self.queue.async { [weak self] in
                     guard let self,
                           self.process === terminatedProcess,
                           !self.isStopping else { return }
@@ -1046,8 +1376,8 @@ final class CodexUsageClient {
 
             outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
-                guard !data.isEmpty else { return }
-                self?.queue.async {
+                guard !data.isEmpty, let self else { return }
+                self.queue.async { [weak self] in
                     self?.consume(data)
                 }
             }
@@ -1215,38 +1545,86 @@ final class UsageStore: ObservableObject {
 
     private let client = CodexUsageClient()
     private var refreshTimer: Timer?
+    private var retryWorkItem: DispatchWorkItem?
+    private var lastSuccessfulWindows: [UsageWindowDisplay]?
+    private var consecutiveFailures = 0
+    private var isRefreshInFlight = false
+    private let retryDelays: [TimeInterval]
 
-    init() {
+    init(
+        refreshInterval: TimeInterval? = 60,
+        retryDelays: [TimeInterval] = [2, 5]
+    ) {
+        self.retryDelays = retryDelays
         refresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refresh()
+        if let refreshInterval {
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) {
+                [weak self] _ in
+                Task { @MainActor in
+                    self?.refresh()
+                }
             }
+            refreshTimer?.tolerance = min(5, refreshInterval / 10)
         }
     }
 
     deinit {
+        retryWorkItem?.cancel()
         refreshTimer?.invalidate()
         client.stop()
     }
 
     func refresh() {
-        client.refresh { [weak self] result in
-            DispatchQueue.main.async {
+        guard !isRefreshInFlight else { return }
+        isRefreshInFlight = true
+        client.refresh { result in
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.isRefreshInFlight = false
                 switch result {
                 case let .success(windows):
-                    self.state = .available(windows)
+                    self.retryWorkItem?.cancel()
+                    self.retryWorkItem = nil
+                    self.consecutiveFailures = 0
+                    self.lastSuccessfulWindows = windows
+                    self.state = .available(windows, isStale: false)
                 case let .failure(error):
-                    self.state = .unavailable(error.localizedDescription)
+                    self.consecutiveFailures += 1
+                    if let lastSuccessfulWindows = self.lastSuccessfulWindows {
+                        self.state = .available(lastSuccessfulWindows, isStale: true)
+                    } else if self.consecutiveFailures > self.retryDelays.count {
+                        self.state = .unavailable(error.localizedDescription)
+                    } else {
+                        self.state = .loading
+                    }
+
+                    let retryIndex = self.consecutiveFailures - 1
+                    guard self.retryDelays.indices.contains(retryIndex) else { return }
+                    if self.consecutiveFailures == 2 {
+                        self.client.reset()
+                    }
+                    self.scheduleRetry(after: self.retryDelays[retryIndex])
                 }
             }
         }
     }
 
     func stop() {
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
         refreshTimer?.invalidate()
         client.stop()
+    }
+
+    private func scheduleRetry(after delay: TimeInterval) {
+        retryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                self?.refresh()
+            }
+        }
+        retryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 }
 
@@ -1498,9 +1876,14 @@ struct TaskListView: View {
             case .loading:
                 Text("正在读取剩余用量…")
                     .foregroundStyle(.secondary)
-            case let .available(windows):
+            case let .available(windows, isStale):
                 Text("剩余用量")
                     .foregroundStyle(.secondary)
+                if isStale {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
                 Spacer(minLength: 4)
                 ForEach(windows) { window in
                     HStack(spacing: 3) {
@@ -1537,7 +1920,8 @@ struct TaskListView: View {
         switch usageStore.state {
         case .loading:
             return .secondary
-        case let .available(windows):
+        case let .available(windows, isStale):
+            if isStale { return .orange }
             return windows.map(\.remainingPercent).min().map(usageColor(for:)) ?? .secondary
         case .unavailable:
             return .orange
@@ -1554,8 +1938,10 @@ struct TaskListView: View {
         switch usageStore.state {
         case .loading:
             return "正在通过 Codex 官方服务读取剩余用量"
-        case .available:
-            return "剩余用量每 60 秒刷新。不显示重置时间。"
+        case let .available(_, isStale):
+            return isStale
+                ? "官方用量服务刚才响应失败，正在自动重试；当前显示上次成功读取的数据。"
+                : "剩余用量每 60 秒刷新。不显示重置时间。"
         case let .unavailable(message):
             return message
         }
@@ -1565,9 +1951,11 @@ struct TaskListView: View {
         switch usageStore.state {
         case .loading:
             return "正在读取剩余用量"
-        case let .available(windows):
+        case let .available(windows, isStale):
             let details = windows.map { "\($0.label)剩余\($0.remainingPercent)%" }.joined(separator: "，")
-            return "剩余用量，\(details)"
+            return isStale
+                ? "剩余用量，\(details)，更新稍有延迟，正在自动重试"
+                : "剩余用量，\(details)"
         case .unavailable:
             return "用量暂时不可用"
         }
@@ -2185,6 +2573,55 @@ enum SelfTest {
                 return 15
             }
 
+            var incrementalRuntimeStatus = ""
+            if let rolloutRoot = ProcessInfo.processInfo.environment["CODEX_ROLLOUT_ROOT_OVERRIDE"],
+               !rolloutRoot.isEmpty {
+                let fixtureURL = URL(fileURLWithPath: rolloutRoot, isDirectory: true)
+                    .appendingPathComponent("incremental-runtime-\(UUID().uuidString).jsonl")
+                defer { try? FileManager.default.removeItem(at: fixtureURL) }
+
+                let ignoredLine = Data("""
+                {"type":"response_item","payload":{"type":"message","content":"performance fixture"}}
+
+                """.utf8)
+                var initialData = Data("""
+                {"type":"event_msg","payload":{"type":"task_started"}}
+
+                """.utf8)
+                for _ in 0..<20_000 {
+                    initialData.append(ignoredLine)
+                }
+                try initialData.write(to: fixtureURL, options: .atomic)
+
+                let incrementalRepository = RolloutTaskStateRepository()
+                guard incrementalRepository.loadState(rolloutPath: fixtureURL.path) == .running else {
+                    fputs("SELF_TEST_FAILED initial incremental runtime state\n", stderr)
+                    return 17
+                }
+
+                let appendHandle = try FileHandle(forWritingTo: fixtureURL)
+                try appendHandle.seekToEnd()
+                appendHandle.write(Data("""
+                {"type":"event_msg","payload":{"type":"task_complete"}}
+
+                """.utf8))
+                try appendHandle.close()
+
+                guard incrementalRepository.loadState(rolloutPath: fixtureURL.path) == .idle else {
+                    fputs("SELF_TEST_FAILED appended incremental runtime state\n", stderr)
+                    return 18
+                }
+                let diagnostics = incrementalRepository.diagnosticsSnapshot()
+                guard diagnostics.fullScanCount == 1,
+                      diagnostics.incrementalScanCount == 1,
+                      diagnostics.fullScanBytes > 1_000_000,
+                      diagnostics.incrementalScanBytes < 1_024 else {
+                    fputs("SELF_TEST_FAILED incremental runtime scan metrics\n", stderr)
+                    return 19
+                }
+                incrementalRuntimeStatus = " incremental_runtime=ok"
+            }
+
             guard TaskDisplayState.resolve(runtimeState: .running, hasUnreadUpdate: true) == .running,
                   TaskDisplayState.resolve(runtimeState: .needsAction, hasUnreadUpdate: true) == .needsAction,
                   TaskDisplayState.resolve(runtimeState: .idle, hasUnreadUpdate: true) == .needsReview,
@@ -2195,7 +2632,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
@@ -2205,16 +2642,30 @@ enum SelfTest {
 }
 
 enum UsageClientSelfTest {
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<[UsageWindowDisplay], Error>?
+
+        func store(_ newValue: Result<[UsageWindowDisplay], Error>) {
+            lock.lock()
+            result = newValue
+            lock.unlock()
+        }
+
+        func load() -> Result<[UsageWindowDisplay], Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
     static func run(expectFixtureValues: Bool = true) -> Int32 {
         let client = CodexUsageClient()
         let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var capturedResult: Result<[UsageWindowDisplay], Error>?
+        let resultBox = ResultBox()
 
         client.refresh { result in
-            lock.lock()
-            capturedResult = result
-            lock.unlock()
+            resultBox.store(result)
             semaphore.signal()
         }
 
@@ -2224,9 +2675,7 @@ enum UsageClientSelfTest {
             return 10
         }
         client.stop()
-        lock.lock()
-        let result = capturedResult
-        lock.unlock()
+        let result = resultBox.load()
 
         switch result {
         case let .success(windows):
@@ -2249,6 +2698,61 @@ enum UsageClientSelfTest {
     }
 }
 
+enum UsageResilienceSelfTest {
+    @MainActor
+    static func run() -> Int32 {
+        let store = UsageStore(refreshInterval: nil, retryDelays: [0.25, 0.25])
+        defer { store.stop() }
+
+        guard waitUntil(timeout: 5, condition: {
+            if case let .available(windows, isStale) = store.state {
+                return windows.count == 2 && !isStale
+            }
+            return false
+        }) else {
+            fputs("USAGE_RESILIENCE_SELF_TEST_FAILED initial success\n", stderr)
+            return 20
+        }
+
+        store.refresh()
+        guard waitUntil(timeout: 5, condition: {
+            if case let .available(windows, isStale) = store.state {
+                return windows.count == 2 && isStale
+            }
+            return false
+        }) else {
+            fputs("USAGE_RESILIENCE_SELF_TEST_FAILED stale fallback\n", stderr)
+            return 21
+        }
+
+        guard waitUntil(timeout: 5, condition: {
+            if case let .available(windows, isStale) = store.state {
+                return windows.count == 2 && !isStale
+            }
+            return false
+        }) else {
+            fputs("USAGE_RESILIENCE_SELF_TEST_FAILED automatic retry\n", stderr)
+            return 22
+        }
+
+        print("USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok")
+        return 0
+    }
+
+    @MainActor
+    private static func waitUntil(
+        timeout: TimeInterval,
+        condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
+    }
+}
+
 @main
 struct CodexRecentTasksMain {
     @MainActor
@@ -2258,6 +2762,9 @@ struct CodexRecentTasksMain {
         }
         if CommandLine.arguments.contains("--usage-self-test") {
             Darwin.exit(UsageClientSelfTest.run())
+        }
+        if CommandLine.arguments.contains("--usage-resilience-self-test") {
+            Darwin.exit(UsageResilienceSelfTest.run())
         }
         if CommandLine.arguments.contains("--usage-probe") {
             Darwin.exit(UsageClientSelfTest.run(expectFixtureValues: false))

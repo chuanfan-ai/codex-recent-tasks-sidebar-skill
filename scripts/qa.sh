@@ -12,8 +12,17 @@ FIXTURE_GLOBAL_STATE="$FIXTURE_DIR/codex-global-state.json"
 FIXTURE_RUNNING_ROLLOUT="$FIXTURE_DIR/running-rollout.jsonl"
 FIXTURE_ACTION_ROLLOUT="$FIXTURE_DIR/action-rollout.jsonl"
 FIXTURE_USAGE_SERVER="$FIXTURE_DIR/fake-codex"
+FIXTURE_FLAKY_USAGE_SERVER="$FIXTURE_DIR/fake-codex-flaky"
 
 "$ROOT/scripts/build_app.sh"
+/usr/bin/swiftc \
+  -parse-as-library \
+  -target "$(/usr/bin/uname -m)-apple-macos13.0" \
+  -module-cache-path "$BUILD_DIR/.module-cache" \
+  -warn-concurrency \
+  -warnings-as-errors \
+  -typecheck \
+  "$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
 /usr/bin/codesign --verify --deep --strict "$APP_DIR"
 /usr/bin/file "$BINARY" "$APP_DIR/Contents/Resources/AppIcon.icns"
@@ -102,6 +111,25 @@ done
 ZSH
 chmod +x "$FIXTURE_USAGE_SERVER"
 
+cat > "$FIXTURE_FLAKY_USAGE_SERVER" <<'ZSH'
+#!/bin/zsh
+rate_request_count=0
+while IFS= read -r line; do
+  if [[ "$line" == *'"method"'*'"initialize"'* ]]; then
+    print '{"id":1,"result":{"serverInfo":{"name":"fake-codex-flaky","version":"1"}}}'
+  elif [[ "$line" == *'"id"'* ]]; then
+    (( rate_request_count += 1 ))
+    request_id="$(print -r -- "$line" | /usr/bin/sed -E 's/.*"id"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/')"
+    if (( rate_request_count == 2 )); then
+      print "{\"id\":${request_id},\"error\":{\"code\":-32000,\"message\":\"temporary fixture failure\"}}"
+    else
+      print "{\"id\":${request_id},\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":35,\"windowDurationMins\":300},\"secondary\":{\"usedPercent\":90,\"windowDurationMins\":10080}}}}"
+    fi
+  fi
+done
+ZSH
+chmod +x "$FIXTURE_FLAKY_USAGE_SERVER"
+
 before_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
 before_index_hash="$(/usr/bin/shasum "$FIXTURE_INDEX")"
 before_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
@@ -125,7 +153,7 @@ after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 after_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
 after_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
@@ -137,6 +165,15 @@ usage_test_output="$(
 [[ "$usage_test_output" == "USAGE_SELF_TEST_OK windows=2" ]] || {
   print -u2 "Codex 用量协议自检失败：$usage_test_output"
   exit 9
+}
+
+usage_resilience_output="$(
+  CODEX_APP_SERVER_OVERRIDE="$FIXTURE_FLAKY_USAGE_SERVER" \
+  "$BINARY" --usage-resilience-self-test
+)"
+[[ "$usage_resilience_output" == "USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok" ]] || {
+  print -u2 "Codex 用量容错自检失败：$usage_resilience_output"
+  exit 14
 }
 
 set +e
@@ -205,4 +242,5 @@ fi
 
 print "$self_test_output"
 print "$usage_test_output"
+print "$usage_resilience_output"
 print "QA_OK app=$APP_DIR"

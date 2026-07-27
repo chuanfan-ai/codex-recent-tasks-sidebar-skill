@@ -10,7 +10,7 @@ Build from the bundled template instead of recreating the app. Preserve its read
 ## Workflow
 
 1. Confirm the machine is macOS 13 or newer and has `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
-2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database, `session_index.jsonl`, `.codex-global-state.json`, and per-task rollout file under `~/.codex/` without copying, printing, or committing task contents or task IDs. Read only rollout event types, tool names, completion IDs, and the approval-policy field needed to distinguish running from waiting; never display or log rollout payload content. The global state is used only to match each visible top-level task's own Codex unread state; never promote a child thread's residual unread state to its parent. Remaining usage is enabled by default and requires the official bundled `codex app-server` plus the user's existing signed-in state.
+2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database, `session_index.jsonl`, `.codex-global-state.json`, and per-task rollout file under `~/.codex/` without copying, printing, or committing task contents or task IDs. Read only rollout event types, tool names, completion IDs, and the approval-policy field needed to distinguish running from waiting; never display or log rollout payload content. Keep database and rollout parsing off the main thread; after the first bounded reverse scan, consume only newly appended complete JSONL records. The global state is used only to match each visible top-level task's own Codex unread state; never promote a child thread's residual unread state to its parent. Remaining usage is enabled by default and requires the official bundled `codex app-server` plus the user's existing signed-in state.
 3. Use `scripts/build_app.sh [output-directory]`. The script compiles the template for the current Mac architecture and creates an ad-hoc-signed `CodexRecentTasksSidebar.app` whose visible name is “Codex 最近任务”.
 4. Run the repository-level `scripts/qa.sh` when working from the full repository. If the Skill is installed alone, run the built binary with `--self-test` against a disposable SQLite fixture and `--usage-self-test` against a fake executable supplied through `CODEX_APP_SERVER_OVERRIDE` before using real data.
 5. Launch the app and verify the real UI:
@@ -18,7 +18,7 @@ Build from the bundled template instead of recreating the app. Preserve its read
    - recent tasks are grouped by canonical working folder and sorted newest first;
    - renamed task notes from `session_index.jsonl` replace stale database titles on the next refresh;
    - status priority is “待操作 → 运行中 → 待查看 → time”: an active task never shows “待查看” early, a stopped unread task does, and opening it clears the label after refresh;
-   - remaining usage percentages appear without reset times; a usage failure leaves the task list usable;
+   - remaining usage percentages appear without reset times; one transient failure keeps the last successful percentages and retries automatically, while repeated failures leave the task list usable;
    - left and right docking both work;
    - docked mode follows the Codex foreground/background layer;
    - pinned mode stays above other apps and remains draggable;
@@ -41,6 +41,8 @@ The public template intentionally uses the generic bundle identifier `io.github.
 - Keep archived tasks, threads with a real parent edge, and internal agent records excluded. Do not exclude a root thread solely because `thread_source` is labeled `subagent`.
 - Do not claim cross-platform support. The bundled app targets macOS 13+ and is validated on Apple Silicon; compile natively on the target Mac.
 - Interpret blue “运行中” from the latest unmatched `task_started`, orange “待操作” from an unfinished explicit user-input or approval request, and green “待查看” only when the task is no longer active and has an unread update. Match unread by task ID directly and never infer it from child-thread state. These labels never mean the conversation is permanently completed or archived.
+- Never scan a growing rollout from the beginning or repeat its bounded reverse scan on every timer tick. Cache its last complete byte offset and state, advance from appended records on a background queue, and fall back to a bounded reverse scan only when the file is first seen, replaced, truncated, or grows beyond the incremental safety limit.
+- Treat one `account/rateLimits/read` error as transient: keep the last successful in-memory percentages, retry shortly, and restart the official child process only after repeated failure. Do not persist usage responses or expose reset timestamps.
 - If the Codex database schema, unread-state format, app-server rate-limit response, bundle identifier, or deep-link scheme changes, diagnose the current installation before patching the template.
 
 ## Delivery report
