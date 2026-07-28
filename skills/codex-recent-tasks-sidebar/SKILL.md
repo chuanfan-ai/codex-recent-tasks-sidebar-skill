@@ -1,50 +1,83 @@
 ---
 name: codex-recent-tasks-sidebar
-description: Build, customize, validate, or repair a native macOS Codex recent-tasks companion window. Use when a user wants a Dock-visible SwiftUI utility that reads recent Codex tasks, running/attention/unread state, and remaining usage, groups tasks by working folder, shows activity times, opens exact tasks, docks on either side of Codex, follows Codex foreground state, or stays independently pinned.
+description: Build, customize, validate, or repair the native macOS 本机AI状态栏. Use when a user wants a 240-point always-on-top utility that monitors active Codex, QwenWorkCN, and Kimi threads and remaining quota without exposing task content or credentials.
 ---
 
-# Codex Recent Tasks Sidebar
+# 本机AI状态栏
 
-Build from the bundled template instead of recreating the app. Preserve its read-only data boundary and complete the real macOS checks before delivery.
+Use the bundled native SwiftUI template. Preserve the local-only privacy boundary and complete both synthetic QA and privacy-safe live checks before delivery.
 
 ## Workflow
 
-1. Confirm the machine is macOS 13 or newer and has `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
-2. Confirm Codex or the ChatGPT desktop app has been used at least once. Locate its task database, `session_index.jsonl`, `.codex-global-state.json`, and per-task rollout file under `~/.codex/` without copying, printing, or committing task contents or task IDs. Read only rollout event types, tool names, completion IDs, and the approval-policy field needed to distinguish running from waiting; never display or log rollout payload content. Keep database and rollout parsing off the main thread; after the first bounded reverse scan, consume only newly appended complete JSONL records. The global state is used only to match each visible top-level task's own Codex unread state; never promote a child thread's residual unread state to its parent. Remaining usage is enabled by default and requires the official bundled `codex app-server` plus the user's existing signed-in state.
-3. Use `scripts/build_app.sh [output-directory]`. The script compiles the template for the current Mac architecture and creates an ad-hoc-signed `CodexRecentTasksSidebar.app` whose visible name is “Codex 最近任务”.
-4. Run the repository-level `scripts/qa.sh` when working from the full repository. If the Skill is installed alone, run the built binary with `--self-test` against a disposable SQLite fixture and `--usage-self-test` against a fake executable supplied through `CODEX_APP_SERVER_OVERRIDE` before using real data.
-5. Launch the app and verify the real UI:
-   - the custom icon and Dock item are present;
-   - recent tasks are grouped by canonical working folder and sorted newest first;
-   - renamed task notes from `session_index.jsonl` replace stale database titles on the next refresh;
-   - status priority is “待操作 → 运行中 → 待查看 → time”: an active task never shows “待查看” early, a stopped unread task does, and opening it clears the label after refresh;
-   - remaining usage percentages appear without reset times; one transient failure keeps the last successful percentages and retries automatically, while repeated failures leave the task list usable;
-   - left and right docking both work;
-   - docked mode follows the Codex foreground/background layer;
-   - pinned mode stays above other apps and remains draggable;
-   - clicking a task activates Codex and opens its exact `codex://threads/{id}` deep link;
-   - switching to Codex does not close or terminate the companion app.
-6. Install or replace an app in `/Applications` only when the user has authorized that write.
+1. Confirm macOS 13+ and the presence of `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
+2. Keep all real Codex, QwenWorkCN, and Kimi task stores read-only. Never print, copy, upload, commit, or summarize real task titles, IDs, messages, database rows, session files, credentials, or raw quota responses.
+3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
+4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three agents, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, input hashes, signing, and redaction.
+5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
+6. Verify the live application without exposing task content:
+   - custom icon, Dock entry, and menu bar item exist;
+   - the window width is 240 points and text remains readable;
+   - only running, waiting-for-action, and pending-review threads appear;
+   - real Chinese project and thread names are preserved;
+   - pinned and docked modes both stay above other applications;
+   - left and right docking align the panel with the Codex bottom edge;
+   - Codex opens the exact `codex://threads/{id}` target;
+   - QwenWorkCN opens the exact local Chat ID through its desktop bridge;
+   - Kimi opens the Agent page, with exact-session navigation reported as unavailable until a verifiable upstream route exists;
+   - quota failures degrade to a visible unavailable/stale state without blocking task monitoring.
 
-## Customization
+## Data adapters
 
-Edit only files under `assets/app-template/` when the user asks for a different app name, bundle identifier, time window, colors, or layout. Keep the default behavior when no customization is requested.
+### Codex
 
-The public template intentionally uses the generic bundle identifier `io.github.codexrecenttasks.sidebar`. Change it before distributing a separately branded fork.
+- Read the task database, `session_index.jsonl`, `.codex-global-state.json`, and bounded rollout event metadata.
+- Match unread state by top-level Thread ID.
+- Treat `needsAction`, `running`, and stopped-unread `needsReview` as active.
+- Use the bundled Codex service for quota, retaining only in-memory percentages.
+
+### QwenWorkCN
+
+- Open `agents.db` read-only and select only project/chat/sub-chat identity, status, and timestamps.
+- Use the running desktop app's localhost bridge only for `auth.getUsage`, pending-completion Chat IDs, and `desktopApi.openMainWindowWithChat(chatId)`.
+- Do not read page titles, DOM content, cookies, bearer tokens, or credential stores.
+- If the bridge is unavailable, keep local activity visible where possible and mark quota unavailable.
+
+### Kimi
+
+- Read only the local session index, state metadata, and `context.append_loop_event` records needed to balance `step.begin` and `step.end`.
+- Bound wire-file reads and prefilter event lines before JSON parsing.
+- Read quota through a real PTY invocation of Kimi CLI `/usage`.
+- Reuse one dedicated monitoring session, save only its session ID, and exclude it from activity results.
+- Never delete diagnostic or monitor sessions without explicit user authorization.
+
+## Presentation rules
+
+- Product name: `本机AI状态栏`.
+- Fixed panel width: 240 points.
+- Use compact native macOS typography and system materials.
+- Keep semantic status indicators restrained: running, waiting for action, pending review, unavailable.
+- Group active threads by real project name. Do not substitute English demo labels in live UI.
+- Always-on-top is the invariant. Docked versus pinned changes position, not layer.
+- Docking aligns bottom edges, not top edges.
 
 ## Safety boundaries
 
-- Treat the Codex SQLite database, rollout files, `session_index.jsonl`, and `.codex-global-state.json` as read-only. Never migrate, vacuum, replace, upload, or write to them.
-- Fetch remaining usage only through the official `codex app-server` using the existing login state. Do not read, print, persist, or commit auth files, tokens, raw account responses, or reset timestamps.
-- Never commit a real `.sqlite` file, task title, thread ID, username path, API key, token, crash log, or local build cache.
-- Keep task selection keyed by the unique thread ID; titles are not unique identifiers.
-- Keep archived tasks, threads with a real parent edge, and internal agent records excluded. Do not exclude a root thread solely because `thread_source` is labeled `subagent`.
-- Do not claim cross-platform support. The bundled app targets macOS 13+ and is validated on Apple Silicon; compile natively on the target Mac.
-- Interpret blue “运行中” from the latest unmatched `task_started`, orange “待操作” from an unfinished explicit user-input or approval request, and green “待查看” only when the task is no longer active and has an unread update. Match unread by task ID directly and never infer it from child-thread state. These labels never mean the conversation is permanently completed or archived.
-- Never scan a growing rollout from the beginning or repeat its bounded reverse scan on every timer tick. Cache its last complete byte offset and state, advance from appended records on a background queue, and fall back to a bounded reverse scan only when the file is first seen, replaced, truncated, or grows beyond the incremental safety limit.
-- Treat one `account/rateLimits/read` error as transient: keep the last successful in-memory percentages, retry shortly, and restart the official child process only after repeated failure. Do not persist usage responses or expose reset timestamps.
-- If the Codex database schema, unread-state format, app-server rate-limit response, bundle identifier, or deep-link scheme changes, diagnose the current installation before patching the template.
+- Never write to source task databases, task indexes, rollout/wire files, unread state, or credentials.
+- Never log real titles, IDs, local usernames, task payloads, quota payloads, or tokens.
+- Never infer authorization to install or replace `/Applications/本机AI状态栏.app`.
+- Keep task selection keyed by unique IDs; titles are display labels only.
+- Do not present Kimi navigation as exact until a working per-session route is independently verified.
+- Treat upstream schema, local bridge, CLI output, bundle ID, and deep-link changes as adapter failures, not permission to inspect secrets.
 
 ## Delivery report
 
-Report the output app path, macOS architecture, self-test result, UI checks, database read-only evidence, known issues, and unverified items. Do not mark delivery complete when a required real UI check is missing.
+Report:
+
+- build app path and architecture;
+- synthetic QA result;
+- privacy-safe live connection result for each agent;
+- icon, Dock, always-on-top, left/right bottom docking, and navigation checks;
+- known limitations and any unverified check;
+- confirmation that `/Applications` was untouched.
+
+Do not mark delivery complete if a required check was skipped or if any result would require revealing real task content.

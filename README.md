@@ -1,52 +1,64 @@
-# Codex 最近任务栏
+# 本机AI状态栏
 
-一个原生 macOS 伴生小工具：直接显示最近活跃的 Codex 任务时间、运行状态和未读更新状态，按工作文件夹分组，并可精确跳转到对应任务。
+一个常驻桌面的原生 macOS 小工具，用 240 像素窄栏同时查看 Codex、QwenWorkCN 和 Kimi 的剩余额度与活动线程。
 
-它支持吸附在 Codex 左侧或右侧、跟随 Codex 前后层级，也可以切换为独立置顶窗口。应用有自己的图标和 Dock 入口。
+它只显示正在运行、等待操作或待查看的线程，按真实项目分组并保留中文项目名、中文线程名。窗口始终位于其他应用之上，可以自由摆放，也可以吸附在 Codex 左右两侧并与其底边对齐。
 
-> 非 OpenAI 官方项目。任务列表、运行状态和未读状态只读取本机 Codex 数据；剩余用量默认通过 ChatGPT / Codex 自带的官方服务联网读取。不上传任务，不修改数据库、rollout 事件流、任务备注索引或未读状态。
+> 非 OpenAI、阿里云或 Moonshot 官方项目。应用只在本机读取必要的状态字段，不显示、打印、保存或上传任务正文与凭证，也不会修改任何任务数据库或会话文件。
 
-## 最快使用：把这段话交给任意智能体
-
-```text
-请克隆 https://github.com/chuanfan-ai/codex-recent-tasks-sidebar-skill ，完整阅读 skills/codex-recent-tasks-sidebar/SKILL.md，直接使用仓库内模板构建 Codex 最近任务栏。先运行 ./scripts/qa.sh，确认构建、签名、固定测试库、自检和脱敏扫描全部通过；再真实启动 App，验证图标与 Dock、左右吸附、跟随 Codex 前后台、单独置顶、点击任务精确跳转。未经我确认不要覆盖 /Applications 里的现有 App，也不要读取、打印、复制或上传我的真实任务内容。
-```
-
-适用于 Codex、Claude Code 及其他能读取本地文件、执行终端命令的智能体。
-
-## 自己构建
+## 构建和启动
 
 要求：
 
 - macOS 13 或更高版本
-- 已安装并至少使用过一次 Codex / ChatGPT 桌面端
-- 如需显示剩余用量，ChatGPT / Codex 需处于已登录状态
-- 已安装 Xcode Command Line Tools，系统存在 `/usr/bin/swiftc`
+- 已安装 Xcode Command Line Tools
+- 已在本机使用过需要监控的桌面应用或命令行工具
 
 ```bash
 git clone https://github.com/chuanfan-ai/codex-recent-tasks-sidebar-skill.git
 cd codex-recent-tasks-sidebar-skill
 ./scripts/qa.sh
-open "build/CodexRecentTasksSidebar.app"
+open "build/本机AI状态栏.app"
 ```
 
-构建产物位于 `build/CodexRecentTasksSidebar.app`，窗口和 Dock 中仍显示“Codex 最近任务”。确认无误后，可以手动拖入“应用程序”文件夹。
+构建产物位于 `build/本机AI状态栏.app`。确认无误后，可由用户自行放入“应用程序”文件夹；构建脚本不会覆盖 `/Applications` 中的现有应用。
 
-## 功能
+## 当前行为
 
-- 从 `~/.codex/state_5.sqlite` 或兼容位置只读加载主任务。
-- 从 `~/.codex/session_index.jsonl` 只读合并最新任务备注，改名后会在下一次 30 秒刷新时同步。
-- 从任务自己的 `~/.codex/sessions/` rollout 事件流只读判断状态：运行时显示蓝色“运行中”；等待用户输入或命令授权时显示橙色“待操作”。解析在后台执行，首次定位状态后只增量读取新追加的事件，避免大任务周期性卡住界面。
-- 从 `~/.codex/.codex-global-state.json` 只读匹配 Codex 为当前顶层任务记录的未读更新；任务停止后才显示绿色“待查看”。内部子线程残留不会被误算到顶层任务。
-- 自动排除归档任务、存在真实父子关系的子智能体和内部线程；不会因新版 Codex 的宽泛来源标签误删顶层任务。
-- 按真实工作目录分组；同一文件夹保留全部近期任务。
-- 文件夹和任务都按最近活动时间倒序排列。
-- 每条任务使用唯一 Thread ID，通过 `codex://threads/{id}` 精确打开。
-- 左右吸附 Codex，也支持拖动切换吸附侧。
-- 吸附模式跟随 Codex：Codex 前置时同步前置，切换其他应用时自动后置。
-- 单独置顶模式保持全局前置并可自由拖动。
-- 默认显示 Codex 剩余用量百分比，不显示重置时间；官方服务单次失败时保留上次成功数据并自动重试，连续失败才显示暂时不可用，且始终不影响任务列表。
-- 自带应用图标、Dock 入口、菜单栏入口和搜索；运行状态每 5 秒、任务和备注每 30 秒、用量每 60 秒刷新。
+- 固定宽度 240 像素，使用较小的系统字号，适合作为长期监控窄栏。
+- 同时显示 Codex、QwenWorkCN、Kimi 三个分区的活动线程数与剩余额度。
+- “活动线程”包括“运行中”“待操作”“待查看”，已完成且无待查看更新的历史线程不会显示。
+- 按项目分组，优先使用各应用保存的真实项目名与线程名，不用英文演示名替代。
+- 自由模式与吸附模式都全局置顶；吸附时可选 Codex 左侧或右侧，并与 Codex 底边对齐。
+- Codex 通过唯一 Thread ID 精确跳转。
+- QwenWorkCN 通过本机桌面端接口按 Chat ID 精确跳转。
+- Kimi 当前可打开 Agent 首页，但桌面端尚未提供可验证的单会话深链，因此不能承诺精确跳到对应线程。
+
+## 自动读取额度
+
+- Codex：使用已安装 Codex 自带的服务和当前登录状态，只保留内存中的剩余百分比。
+- QwenWorkCN：连接正在本机运行的桌面端，只读取额度汇总与待查看 Chat ID，不读取页面标题、任务正文或账号凭证。
+- Kimi：调用本机 Kimi CLI 的 `/usage`，使用一个专用本地监控会话并在后续刷新时复用。该会话会从活动线程列表中排除。
+
+如果相应应用未运行、CLI 未安装或现有登录态不可用，界面会显示“额度不可用”，不会尝试读取密钥文件或要求后台提取 Token。
+
+## 数据与隐私边界
+
+- Codex：只读查询任务索引、未读 ID 和 rollout 事件类型；不解析或输出消息正文。
+- QwenWorkCN：只读查询本机 `agents.db` 的项目、线程、更新时间和状态字段；数据库以只读方式打开。
+- Kimi：只读取会话索引、标题/工作目录元数据，以及判断 `step.begin` / `step.end` 所需的事件类型；不显示事件内容。
+- 不提交、不复制、不上传真实数据库、会话文件、任务标题、Thread ID、Chat ID、用户名路径、Token 或重置时间。
+- 本地仅保存窗口位置、吸附侧，以及 Kimi 专用监控会话的 ID。
+
+## 验收
+
+```bash
+./scripts/qa.sh
+```
+
+验收包含原生构建、Swift 严格并发检查、应用名称与 Info.plist 检查、临时签名、架构检查、三类 Agent 的固定合成测试库、自检、额度解析与故障恢复、输入文件只读哈希比对和脱敏扫描。
+
+全部测试数据均由脚本临时生成，不接触真实任务内容。真实启动验收也应遵守相同边界，并且未经用户确认不得覆盖 `/Applications` 中的应用。
 
 ## 仓库结构
 
@@ -56,6 +68,7 @@ open "build/CodexRecentTasksSidebar.app"
 ├── AGENTS.md / CLAUDE.md
 ├── scripts/
 │   ├── build_app.sh
+│   ├── generate_app_icon.swift
 │   └── qa.sh
 └── skills/codex-recent-tasks-sidebar/
     ├── SKILL.md
@@ -67,34 +80,13 @@ open "build/CodexRecentTasksSidebar.app"
         └── AppIcon.icns
 ```
 
-Skill 文件夹可以单独安装，也可以让智能体直接读取。完整仓库额外提供固定测试库、脱敏扫描和 GitHub Actions。
-
-## 隐私边界
-
-- 不提交、不复制真实 Codex 数据库。
-- 不在日志中打印任务正文、Thread ID 或本机用户名路径。
-- App 对 Codex 数据库只执行只读查询，并只提取 rollout 状态标记、任务备注索引和未读更新状态；不显示、保存或上传 rollout 正文。
-- 剩余用量通过 ChatGPT / Codex 自带的官方 `app-server` 和当前登录状态联网读取；App 只保留内存中的百分比，不读取、输出或保存 Token 与重置时间。
-- 本地仅通过 `UserDefaults` 保存窗口位置、吸附侧和显示模式。
-- `build/`、SQLite、日志和本机缓存均被 `.gitignore` 排除。
-
-## 验收
-
-```bash
-./scripts/qa.sh
-```
-
-该命令会执行：原生构建、Swift 严格并发检查、Info.plist 校验、代码签名校验、架构检查、固定 SQLite 测试库、运行/待操作/待查看状态优先级、大 rollout 增量读取、任务备注索引与未读状态自检、五个固定本地数据源的只读哈希比对、Codex 用量协议与“成功 → 临时失败 → 自动恢复”容错自检、缺失程序/索引/状态/数据库边界测试和脱敏扫描。
-
-CI 只使用仓库生成的固定测试数据和假 Codex 用量服务，不访问任何真实 Codex 任务或账号。
-
 ## 已知边界
 
-- 仅支持 macOS；当前真实环境已在 Apple Silicon 上验证。
-- 状态优先级固定为“待操作 → 运行中 → 待查看 → 普通时间”；运行中的任务即使产生未读输出也不会提前显示“待查看”。
-- 绿色“待查看”准确含义是“当前顶层任务已经停止运行，并有新回复尚未查看”；它会随 Codex 的已读状态在刷新后消失，不表示对话永久完成或归档，也不会受内部子线程残留未读影响。
-- Codex 如果更改本地数据库结构、未读状态格式、Bundle ID 或深链协议，需要更新模板。
-- 仓库使用 ad-hoc 签名，没有 Apple Developer ID 公证；首次运行可能受本机 Gatekeeper 设置影响。
+- 仅支持 macOS；当前目标版本为 macOS 13+。
+- QwenWorkCN 自动额度依赖桌面端当前提供的本机调试接口；上游变化后可能需要更新适配。
+- Kimi 额度依赖已安装且已登录的 Kimi CLI。首次启用会创建一个专用本地监控会话，不会自动删除历史诊断会话。
+- Kimi 当前只能打开 Agent 首页，不能精确定位到某个会话。
+- 应用采用 ad-hoc 签名，没有 Apple Developer ID 公证。
 
 ## License
 

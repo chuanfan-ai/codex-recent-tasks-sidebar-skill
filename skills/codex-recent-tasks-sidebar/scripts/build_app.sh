@@ -11,7 +11,7 @@ if [[ -z "$OUTPUT_DIR" || "$OUTPUT_DIR" == "/" || "$OUTPUT_DIR" == "$HOME" ]]; t
   exit 2
 fi
 
-APP_DIR="$OUTPUT_DIR/CodexRecentTasksSidebar.app"
+APP_DIR="$OUTPUT_DIR/本机AI状态栏.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -37,7 +37,7 @@ cp "$TEMPLATE_DIR/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
   -target "${ARCH}-apple-macos${MIN_MACOS}" \
   -module-cache-path "$MODULE_CACHE" \
   "$TEMPLATE_DIR/Codex最近任务栏.swift" \
-  -o "$MACOS_DIR/Codex最近任务栏"
+  -o "$MACOS_DIR/本机AI状态栏"
 
 /usr/bin/codesign --force --deep --sign - "$APP_DIR"
 print "已构建：$APP_DIR"

@@ -10,7 +10,7 @@ enum TaskRuntimeState: String, Equatable, Sendable {
     case needsAction
 }
 
-enum TaskDisplayState: Equatable {
+enum TaskDisplayState: Equatable, Sendable {
     case idle
     case running
     case needsAction
@@ -242,11 +242,17 @@ enum KimiUsageTextParser {
 }
 
 enum KimiWireStateParser {
+    private static let loopEventMarker = Data(#""context.append_loop_event""#.utf8)
+
     static func runtimeState(from data: Data) -> TaskRuntimeState {
         var activeStepCount = 0
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
-            guard line.count <= 4 * 1024 * 1024,
-                  let record = try? JSONSerialization.jsonObject(with: Data(line))
+            guard line.count <= 4 * 1024 * 1024 else {
+                continue
+            }
+            let recordData = Data(line)
+            guard recordData.range(of: loopEventMarker) != nil,
+                  let record = try? JSONSerialization.jsonObject(with: recordData)
                     as? [String: Any],
                   record["type"] as? String == "context.append_loop_event",
                   let event = record["event"] as? [String: Any],
@@ -260,6 +266,1187 @@ enum KimiWireStateParser {
             }
         }
         return activeStepCount > 0 ? .running : .idle
+    }
+}
+
+enum AgentKind: String, CaseIterable, Identifiable, Sendable {
+    case codex
+    case qwen
+    case kimi
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .codex:
+            return "Codex"
+        case .qwen:
+            return "QwenWorkCN"
+        case .kimi:
+            return "Kimi"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .codex:
+            return "chevron.left.forwardslash.chevron.right"
+        case .qwen:
+            return "sparkles"
+        case .kimi:
+            return "moon.stars.fill"
+        }
+    }
+}
+
+struct LocalAgentTask: Identifiable, Equatable, Sendable {
+    let id: String
+    let agent: AgentKind
+    let title: String
+    let projectName: String
+    let projectPath: String
+    let updatedMillis: Int64
+    let displayState: TaskDisplayState
+    let navigationID: String
+}
+
+enum CodexProjectNameResolver {
+    private static let maximumMetadataSize = 256 * 1024
+    private static let projectPattern =
+        #"local mirror of the ChatGPT project\s+[“"]([^”"\r\n]{1,160})[”"]"#
+
+    static func projectName(for path: String) -> String {
+        let canonicalURL = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let fallback = canonicalURL.lastPathComponent.isEmpty
+            ? "未归类" : canonicalURL.lastPathComponent
+        guard fallback.hasPrefix("g-p-") else {
+            return fallback
+        }
+
+        let instructionsURL = canonicalURL.appendingPathComponent("AGENTS.md")
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: instructionsURL.path
+        ),
+        let fileSize = attributes[.size] as? NSNumber,
+        fileSize.intValue <= maximumMetadataSize,
+        let data = try? Data(contentsOf: instructionsURL, options: .mappedIfSafe),
+        let resolved = projectName(fromAgentInstructions: data) else {
+            return fallback
+        }
+        return resolved
+    }
+
+    static func projectName(fromAgentInstructions data: Data) -> String? {
+        guard data.count <= maximumMetadataSize,
+              let text = String(data: data, encoding: .utf8),
+              let expression = try? NSRegularExpression(
+                  pattern: projectPattern,
+                  options: [.caseInsensitive]
+              ) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = expression.firstMatch(in: text, range: range),
+              let nameRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        let name = text[nameRange].trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+}
+
+private struct QwenTaskRecord: Decodable {
+    let id: String
+    let chatID: String
+    let title: String
+    let projectName: String
+    let projectPath: String
+    let updatedMillis: Int64
+    let taskStatus: String
+    let streamID: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case chatID = "chat_id"
+        case title
+        case projectName = "project_name"
+        case projectPath = "project_path"
+        case updatedMillis = "updated_ms"
+        case taskStatus = "task_status"
+        case streamID = "stream_id"
+    }
+}
+
+struct QwenTaskRepository {
+    private static let query = """
+    SELECT
+      sub.id AS id,
+      chat.id AS chat_id,
+      CASE
+        WHEN trim(COALESCE(sub.name, '')) <> '' THEN substr(sub.name, 1, 240)
+        WHEN trim(COALESCE(chat.name, '')) <> '' THEN substr(chat.name, 1, 240)
+        ELSE '未命名线程'
+      END AS title,
+      COALESCE(NULLIF(trim(project.name), ''), '未归类') AS project_name,
+      COALESCE(NULLIF(trim(project.path), ''), '') AS project_path,
+      CAST(MAX(COALESCE(sub.updated_at, 0), COALESCE(chat.updated_at, 0)) * 1000 AS INTEGER)
+        AS updated_ms,
+      CASE
+        WHEN json_valid(COALESCE(chat.ext, '')) THEN
+          COALESCE(json_extract(chat.ext, '$.taskStatus'), '')
+        ELSE ''
+      END AS task_status,
+      COALESCE(sub.stream_id, '') AS stream_id
+    FROM sub_chats AS sub
+    JOIN chats AS chat ON chat.id = sub.chat_id
+    LEFT JOIN projects AS project ON project.id = chat.project_id
+    WHERE chat.archived_at IS NULL
+      AND chat.deleted_at IS NULL
+    ORDER BY updated_ms DESC, sub.id ASC;
+    """
+
+    static func loadActiveTasks(
+        pendingChatIDs explicitPendingChatIDs: Set<String>? = nil
+    ) throws -> (databaseURL: URL, tasks: [LocalAgentTask]) {
+        let databaseURL = try currentDatabaseURL()
+        let records: [QwenTaskRecord] = try SQLiteJSONReader.read(
+            databaseURL: databaseURL,
+            query: query
+        )
+        let pendingChatIDs = explicitPendingChatIDs ?? pendingChatIDsOverride()
+        let tasks = records.compactMap { record -> LocalAgentTask? in
+            let runtimeState = QwenTaskStatusParser.runtimeState(
+                taskStatus: record.taskStatus,
+                streamID: record.streamID
+            )
+            let displayState = TaskDisplayState.resolve(
+                runtimeState: runtimeState,
+                hasUnreadUpdate: pendingChatIDs.contains(record.chatID)
+            )
+            guard ActivityTaskPolicy.includes(displayState) else {
+                return nil
+            }
+            let projectPath = record.projectPath.isEmpty
+                ? record.projectName : record.projectPath
+            let projectName = record.projectName == "未归类"
+                ? CodexProjectNameResolver.projectName(for: projectPath)
+                : record.projectName
+            return LocalAgentTask(
+                id: record.id,
+                agent: .qwen,
+                title: record.title,
+                projectName: projectName,
+                projectPath: projectPath,
+                updatedMillis: record.updatedMillis,
+                displayState: displayState,
+                navigationID: record.chatID
+            )
+        }
+        return (databaseURL, tasks)
+    }
+
+    private static func pendingChatIDsOverride() -> Set<String> {
+        guard let rawValue = ProcessInfo.processInfo.environment[
+            "QWEN_PENDING_CHAT_IDS_OVERRIDE"
+        ] else {
+            return []
+        }
+        return Set(
+            rawValue.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0.utf8.count <= 256 }
+        )
+    }
+
+    private static func currentDatabaseURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let fileManager = FileManager.default
+        if let override = environment["QWEN_TASK_DB_OVERRIDE"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            guard fileManager.fileExists(atPath: url.path) else {
+                throw TaskRepositoryError.databaseNotFound
+            }
+            return url
+        }
+
+        let url = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/QwenWorkCN/data/agents.db"
+            )
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw TaskRepositoryError.databaseNotFound
+        }
+        return url
+    }
+}
+
+private struct KimiSessionIndexRecord: Decodable {
+    let sessionID: String
+    let sessionDir: String
+    let workDir: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"
+        case sessionDir
+        case workDir
+    }
+}
+
+private struct KimiSessionState: Decodable {
+    let updatedAt: String?
+    let title: String?
+    let workDir: String?
+}
+
+enum KimiMonitorSession {
+    static let defaultsKey = "LocalAIStatusBarKimiMonitorSessionID"
+    private static let legacyDefaultsDomain = "io.github.codexrecenttasks.sidebar"
+
+    static func storedID() -> String? {
+        if let current = UserDefaults.standard.string(forKey: defaultsKey),
+           !current.isEmpty {
+            return current
+        }
+        guard let legacy = UserDefaults.standard.persistentDomain(
+            forName: legacyDefaultsDomain
+        )?[defaultsKey] as? String,
+        !legacy.isEmpty else {
+            return nil
+        }
+        UserDefaults.standard.set(legacy, forKey: defaultsKey)
+        return legacy
+    }
+}
+
+struct KimiTaskRepository {
+    private static let maximumIndexSize = 32 * 1024 * 1024
+    private static let maximumStateSize = 2 * 1024 * 1024
+    private static let maximumWireTailSize = 16 * 1024 * 1024
+
+    static func loadActiveTasks() throws -> (indexURL: URL, tasks: [LocalAgentTask]) {
+        let indexURL = try currentSessionIndexURL()
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: indexURL.path
+        ),
+        let fileSize = attributes[.size] as? NSNumber,
+        fileSize.intValue <= maximumIndexSize,
+        let data = try? Data(contentsOf: indexURL, options: .mappedIfSafe) else {
+            throw TaskRepositoryError.invalidData("Kimi 会话索引不可读")
+        }
+
+        let decoder = JSONDecoder()
+        var latestRecords: [String: KimiSessionIndexRecord] = [:]
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard line.count <= 64 * 1024,
+                  let record = try? decoder.decode(
+                      KimiSessionIndexRecord.self,
+                      from: Data(line)
+                  ),
+                  !record.sessionID.isEmpty,
+                  record.sessionID.utf8.count <= 256 else {
+                continue
+            }
+            latestRecords[record.sessionID] = record
+        }
+
+        let monitorSessionID = ProcessInfo.processInfo.environment[
+            "KIMI_MONITOR_SESSION_ID_OVERRIDE"
+        ] ?? KimiMonitorSession.storedID()
+        let tasks = latestRecords.values.compactMap { record -> LocalAgentTask? in
+            guard record.sessionID != monitorSessionID,
+                  let sessionURL = validatedSessionURL(
+                      path: record.sessionDir,
+                      indexURL: indexURL
+                  ),
+                  let state = loadState(at: sessionURL),
+                  let runtimeState = loadRuntimeState(at: sessionURL),
+                  runtimeState == .running else {
+                return nil
+            }
+
+            let workDir = nonempty(state.workDir) ?? nonempty(record.workDir) ?? sessionURL.path
+            let title = nonempty(state.title) ?? "未命名线程"
+            let updatedMillis = timestampMillis(
+                from: state.updatedAt,
+                fallbackURL: sessionURL.appendingPathComponent("agents/main/wire.jsonl")
+            )
+            return LocalAgentTask(
+                id: record.sessionID,
+                agent: .kimi,
+                title: title,
+                projectName: CodexProjectNameResolver.projectName(for: workDir),
+                projectPath: workDir,
+                updatedMillis: updatedMillis,
+                displayState: .running,
+                navigationID: record.sessionID
+            )
+        }.sorted {
+            if $0.updatedMillis == $1.updatedMillis { return $0.id < $1.id }
+            return $0.updatedMillis > $1.updatedMillis
+        }
+        return (indexURL, tasks)
+    }
+
+    private static func loadState(at sessionURL: URL) -> KimiSessionState? {
+        let stateURL = sessionURL.appendingPathComponent("state.json")
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: stateURL.path
+        ),
+        let fileSize = attributes[.size] as? NSNumber,
+        fileSize.intValue <= maximumStateSize,
+        let data = try? Data(contentsOf: stateURL, options: .mappedIfSafe) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(KimiSessionState.self, from: data)
+    }
+
+    private static func loadRuntimeState(at sessionURL: URL) -> TaskRuntimeState? {
+        let wireURL = sessionURL.appendingPathComponent("agents/main/wire.jsonl")
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: wireURL.path
+        ),
+        let fileSizeNumber = attributes[.size] as? NSNumber,
+        fileSizeNumber.int64Value > 0,
+        let handle = try? FileHandle(forReadingFrom: wireURL) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let fileSize = UInt64(fileSizeNumber.int64Value)
+        let readSize = min(fileSize, UInt64(maximumWireTailSize))
+        do {
+            try handle.seek(toOffset: fileSize - readSize)
+        } catch {
+            return nil
+        }
+        let data = handle.readData(ofLength: Int(readSize))
+        return KimiWireStateParser.runtimeState(from: data)
+    }
+
+    private static func validatedSessionURL(path: String, indexURL: URL) -> URL? {
+        guard !path.isEmpty, path.utf8.count <= 4_096 else { return nil }
+        let candidate = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let allowedRoot: URL
+        if ProcessInfo.processInfo.environment["KIMI_SESSION_INDEX_OVERRIDE"] != nil {
+            allowedRoot = indexURL.deletingLastPathComponent()
+        } else {
+            allowedRoot = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".kimi-code")
+        }
+        let rootPath = allowedRoot
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        guard candidate.path.hasPrefix(rootPath + "/"),
+              FileManager.default.fileExists(atPath: candidate.path) else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func currentSessionIndexURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let fileManager = FileManager.default
+        if let override = environment["KIMI_SESSION_INDEX_OVERRIDE"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            guard fileManager.fileExists(atPath: url.path) else {
+                throw TaskRepositoryError.databaseNotFound
+            }
+            return url
+        }
+        let url = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kimi-code/session_index.jsonl")
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw TaskRepositoryError.databaseNotFound
+        }
+        return url
+    }
+
+    private static func timestampMillis(from rawValue: String?, fallbackURL: URL) -> Int64 {
+        if let rawValue {
+            let fractionalFormatter = ISO8601DateFormatter()
+            fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let basicFormatter = ISO8601DateFormatter()
+            basicFormatter.formatOptions = [.withInternetDateTime]
+            if let date = fractionalFormatter.date(from: rawValue)
+                ?? basicFormatter.date(from: rawValue) {
+                return Int64(date.timeIntervalSince1970 * 1000)
+            }
+        }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: fallbackURL.path)
+        let date = attributes?[.modificationDate] as? Date ?? .distantPast
+        return Int64(date.timeIntervalSince1970 * 1000)
+    }
+
+    private static func nonempty(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+enum KimiUsageError: LocalizedError {
+    case executableNotFound
+    case sessionIndexNotFound
+    case monitorSessionNotFound
+    case commandFailed
+    case timedOut
+    case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .executableNotFound:
+            return "没有找到 Kimi 官方命令行程序"
+        case .sessionIndexNotFound:
+            return "没有找到 Kimi 本机会话索引"
+        case .monitorSessionNotFound:
+            return "无法建立 Kimi 额度监控会话"
+        case .commandFailed:
+            return "Kimi 额度读取命令执行失败"
+        case .timedOut:
+            return "读取 Kimi 剩余额度超时"
+        case .invalidResponse:
+            return "Kimi 没有返回可识别的剩余额度"
+        }
+    }
+}
+
+enum KimiProcessEnvironment {
+    static func sanitized(_ inherited: [String: String]) -> [String: String] {
+        let blockedPrefixes = [
+            "AWS_",
+            "AZURE_",
+            "BROWSER_USE_",
+            "CODEX_",
+            "GH_",
+            "GITHUB_",
+            "GOOGLE_",
+            "LOOMLOOM_",
+            "NODE_REPL_",
+            "OPENAI_",
+        ]
+        let blockedFragments = [
+            "ACCESS_KEY",
+            "API_KEY",
+            "AUTH",
+            "CONNECTION_STRING",
+            "COOKIE",
+            "CREDENTIAL",
+            "DATABASE",
+            "DSN",
+            "PASSWORD",
+            "PASSWD",
+            "PRIVATE_KEY",
+            "SECRET",
+            "SESSION_KEY",
+            "TOKEN",
+        ]
+        let blockedExactKeys = Set([
+            "_",
+            "OLDPWD",
+            "PWD",
+            "SHLVL",
+        ])
+        return inherited.filter { key, _ in
+            let uppercaseKey = key.uppercased()
+            return !blockedExactKeys.contains(key)
+                && !blockedPrefixes.contains(where: uppercaseKey.hasPrefix)
+                && !blockedFragments.contains(where: uppercaseKey.contains)
+        }
+    }
+}
+
+final class KimiUsageClient: @unchecked Sendable {
+    typealias Completion = @Sendable (Result<[UsageWindowDisplay], Error>) -> Void
+
+    private final class DataBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ newData: Data, maximumSize: Int) {
+            lock.lock()
+            let remainingCapacity = max(0, maximumSize - data.count)
+            if remainingCapacity > 0 {
+                data.append(newData.prefix(remainingCapacity))
+            }
+            lock.unlock()
+        }
+
+        func snapshot() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
+        }
+    }
+
+    private static let maximumOutputSize = 4 * 1024 * 1024
+    private static let maximumIndexSize = 32 * 1024 * 1024
+    private let queue = DispatchQueue(
+        label: "io.github.local-ai-statusbar.kimi-usage",
+        qos: .utility
+    )
+
+    func refresh(completion: @escaping Completion) {
+        queue.async {
+            completion(Result {
+                try Self.fetchWindowsSynchronously()
+            })
+        }
+    }
+
+    private static func fetchWindowsSynchronously() throws -> [UsageWindowDisplay] {
+        if let override = ProcessInfo.processInfo.environment[
+            "KIMI_USAGE_TEXT_OVERRIDE"
+        ], !override.isEmpty {
+            let data = try boundedData(at: URL(fileURLWithPath: override))
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw KimiUsageError.invalidResponse
+            }
+            return try parsedWindows(from: text)
+        }
+
+        let executableURL = try executableURL()
+        let indexURL = try sessionIndexURL()
+        let monitorDirectory = try monitorDirectoryURL()
+        let storedSessionID = KimiMonitorSession.storedID()
+        let currentRecords = try sessionRecords(at: indexURL)
+        let reusableSessionID = storedSessionID.flatMap { sessionID in
+            currentRecords.contains(where: { $0.sessionID == sessionID })
+                ? sessionID : nil
+        }
+
+        let output: Data
+        if let reusableSessionID {
+            output = try runUsage(
+                executableURL: executableURL,
+                sessionID: reusableSessionID,
+                workingDirectory: monitorDirectory
+            )
+        } else {
+            let previousIDs = Set(currentRecords.map(\.sessionID))
+            output = try runUsage(
+                executableURL: executableURL,
+                sessionID: nil,
+                workingDirectory: monitorDirectory
+            )
+            let refreshedRecords = try sessionRecords(at: indexURL)
+            let canonicalMonitorPath = monitorDirectory
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+            let monitorRecord = refreshedRecords.reversed().first { record in
+                guard !previousIDs.contains(record.sessionID) else { return false }
+                let workPath = URL(fileURLWithPath: record.workDir)
+                    .resolvingSymlinksInPath()
+                    .standardizedFileURL
+                    .path
+                return workPath == canonicalMonitorPath
+            }
+            guard let monitorRecord else {
+                throw KimiUsageError.monitorSessionNotFound
+            }
+            UserDefaults.standard.set(
+                monitorRecord.sessionID,
+                forKey: KimiMonitorSession.defaultsKey
+            )
+        }
+
+        guard output.count <= maximumOutputSize,
+              let text = String(data: output, encoding: .utf8) else {
+            throw KimiUsageError.invalidResponse
+        }
+        return try parsedWindows(from: text)
+    }
+
+    private static func parsedWindows(from text: String) throws -> [UsageWindowDisplay] {
+        let windows = KimiUsageTextParser.windows(from: text)
+        guard !windows.isEmpty else {
+            throw KimiUsageError.invalidResponse
+        }
+        return windows
+    }
+
+    private static func runUsage(
+        executableURL: URL,
+        sessionID: String?,
+        workingDirectory: URL
+    ) throws -> Data {
+        let process = Process()
+        let outputPipe = Pipe()
+        let outputBox = DataBox()
+        let expectScript = #"""
+        set timeout 18
+        set executable $env(LOCAL_AI_STATUSBAR_KIMI_EXECUTABLE)
+        set session $env(LOCAL_AI_STATUSBAR_KIMI_SESSION)
+        if {$session eq ""} {
+          spawn -noecho $executable
+        } else {
+          spawn -noecho $executable --session $session
+        }
+        after 1800
+        send -- "/usage"
+        after 300
+        send -- "\033\[13u"
+        expect {
+          -re {[0-9]{1,3}% used} {
+            after 1500
+            send -- "/exit"
+            after 300
+            send -- "\033\[13u"
+            set timeout 5
+            expect eof
+          }
+          timeout {
+            send -- "\003"
+            exit 124
+          }
+          eof {}
+        }
+        """#
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
+        process.arguments = ["-c", expectScript]
+        process.currentDirectoryURL = workingDirectory
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+        let inheritedEnvironment = ProcessInfo.processInfo.environment
+        var environment = KimiProcessEnvironment.sanitized(inheritedEnvironment)
+        if environment["PATH"] == nil {
+            environment["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+        environment["TERM"] = "xterm-256color"
+        environment["COLUMNS"] = "80"
+        environment["LINES"] = "24"
+        environment["LOCAL_AI_STATUSBAR_KIMI_EXECUTABLE"] = executableURL.path
+        environment["LOCAL_AI_STATUSBAR_KIMI_SESSION"] = sessionID ?? ""
+        process.environment = environment
+
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            outputBox.append(data, maximumSize: maximumOutputSize)
+        }
+        do {
+            try process.run()
+        } catch {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            throw KimiUsageError.commandFailed
+        }
+        let deadline = Date().addingTimeInterval(24)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            let terminationDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < terminationDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        outputBox.append(
+            outputPipe.fileHandleForReading.readDataToEndOfFile(),
+            maximumSize: maximumOutputSize
+        )
+        if process.isRunning {
+            throw KimiUsageError.timedOut
+        }
+        guard process.terminationStatus == 0 || !outputBox.snapshot().isEmpty else {
+            throw KimiUsageError.commandFailed
+        }
+        return outputBox.snapshot()
+    }
+
+    private static func sessionRecords(at indexURL: URL) throws -> [KimiSessionIndexRecord] {
+        let data = try boundedData(at: indexURL, maximumSize: maximumIndexSize)
+        let decoder = JSONDecoder()
+        return data.split(separator: 0x0A, omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard line.count <= 64 * 1024 else { return nil }
+                return try? decoder.decode(
+                    KimiSessionIndexRecord.self,
+                    from: Data(line)
+                )
+            }
+    }
+
+    private static func sessionIndexURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let fileManager = FileManager.default
+        if let override = environment["KIMI_SESSION_INDEX_OVERRIDE"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            guard fileManager.fileExists(atPath: url.path) else {
+                throw KimiUsageError.sessionIndexNotFound
+            }
+            return url
+        }
+        let url = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kimi-code/session_index.jsonl")
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw KimiUsageError.sessionIndexNotFound
+        }
+        return url
+    }
+
+    private static func executableURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let fileManager = FileManager.default
+        let candidates: [URL]
+        if let override = environment["KIMI_EXECUTABLE_OVERRIDE"], !override.isEmpty {
+            candidates = [URL(fileURLWithPath: override)]
+        } else {
+            let home = fileManager.homeDirectoryForCurrentUser
+            candidates = [
+                home.appendingPathComponent(".local/bin/kimi"),
+                home.appendingPathComponent(".kimi-code/bin/kimi"),
+                URL(fileURLWithPath: "/usr/local/bin/kimi"),
+                URL(fileURLWithPath: "/opt/homebrew/bin/kimi"),
+            ]
+        }
+        guard let executable = candidates.first(where: {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }) else {
+            throw KimiUsageError.executableNotFound
+        }
+        return executable
+    }
+
+    private static func monitorDirectoryURL() throws -> URL {
+        let fileManager = FileManager.default
+        if let override = ProcessInfo.processInfo.environment[
+            "KIMI_MONITOR_DIRECTORY_OVERRIDE"
+        ], !override.isEmpty {
+            let url = URL(fileURLWithPath: override, isDirectory: true)
+            try fileManager.createDirectory(
+                at: url,
+                withIntermediateDirectories: true
+            )
+            return url
+        }
+        let baseURL = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let url = baseURL
+            .appendingPathComponent("本机AI状态栏", isDirectory: true)
+            .appendingPathComponent("Kimi额度监控", isDirectory: true)
+        try fileManager.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        return url
+    }
+
+    private static func boundedData(
+        at url: URL,
+        maximumSize: Int = maximumOutputSize
+    ) throws -> Data {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ),
+        let fileSize = attributes[.size] as? NSNumber,
+        fileSize.intValue <= maximumSize,
+        let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            throw KimiUsageError.invalidResponse
+        }
+        return data
+    }
+}
+
+private enum SQLiteJSONReader {
+    static func read<Record: Decodable>(
+        databaseURL: URL,
+        query: String
+    ) throws -> [Record] {
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            "-readonly",
+            "-json",
+            "-cmd", ".timeout 800",
+            databaseURL.path,
+            query,
+        ]
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        do {
+            try process.run()
+        } catch {
+            throw TaskRepositoryError.sqliteFailed(error.localizedDescription)
+        }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let rawMessage = String(data: errorData, encoding: .utf8) ?? "未知错误"
+            let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw TaskRepositoryError.sqliteFailed(
+                message.isEmpty
+                    ? "sqlite3 退出码 \(process.terminationStatus)" : message
+            )
+        }
+        do {
+            return data.isEmpty ? [] : try JSONDecoder().decode([Record].self, from: data)
+        } catch {
+            throw TaskRepositoryError.invalidData(error.localizedDescription)
+        }
+    }
+}
+
+struct QwenDesktopSnapshot: Equatable, Sendable {
+    let quota: AgentQuotaDisplay
+    let pendingChatIDs: Set<String>
+}
+
+enum QwenDesktopError: LocalizedError {
+    case appNotRunning
+    case bridgeUnavailable
+    case invalidResponse
+    case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .appNotRunning:
+            return "QwenWorkCN 尚未运行"
+        case .bridgeUnavailable:
+            return "QwenWorkCN 本机状态接口暂时不可用"
+        case .invalidResponse:
+            return "QwenWorkCN 返回了无法识别的额度状态"
+        case .timedOut:
+            return "读取 QwenWorkCN 状态超时"
+        }
+    }
+}
+
+enum QwenDesktopSnapshotParser {
+    static func snapshot(from result: [String: Any]) throws -> QwenDesktopSnapshot {
+        let quota = try QwenUsageSnapshotParser.quota(from: result)
+        let rawPendingIDs = result["pendingChatIDs"] as? [Any] ?? []
+        let pendingChatIDs = Set(rawPendingIDs.compactMap { value -> String? in
+            guard let chatID = value as? String,
+                  !chatID.isEmpty,
+                  chatID.utf8.count <= 256 else {
+                return nil
+            }
+            return chatID
+        })
+        return QwenDesktopSnapshot(quota: quota, pendingChatIDs: pendingChatIDs)
+    }
+}
+
+final class QwenDesktopBridge: @unchecked Sendable {
+    private struct DevToolsTarget: Decodable {
+        let webSocketDebuggerUrl: String?
+    }
+
+    private struct DevToolsVersion: Decodable {
+        let webSocketDebuggerUrl: String?
+    }
+
+    private static let bundleIdentifier = "cn.qwenwork.desktop.mac"
+    private static let maximumFixtureSize = 1 * 1024 * 1024
+    private static let snapshotExpression = """
+    Promise.all([
+      new Promise((resolve) => {
+        const id = 741852963;
+        let completed = false;
+        const finish = (value) => {
+          if (completed) return;
+          completed = true;
+          resolve(value);
+        };
+        electronTRPC.onMessage((message) => {
+          if (!message || message.id !== id) return;
+          const data = message.result && message.result.data;
+          const payload = data && data.json ? data.json : data;
+          const quota = payload && payload.userQuota;
+          finish(quota || null);
+        });
+        electronTRPC.sendMessage({
+          method: "request",
+          operation: {
+            id,
+            type: "query",
+            path: "auth.getUsage",
+            input: { json: null },
+            context: {}
+          }
+        });
+        setTimeout(() => finish(null), 5000);
+      }),
+      desktopApi.getPendingCompletions().catch(() => [])
+    ]).then(([quota, pending]) => {
+      const pendingChatIDs = Array.isArray(pending)
+        ? pending.map((item) => {
+            if (typeof item === "string") return item;
+            if (!item || typeof item !== "object") return null;
+            return item.chatId || item.chatID || item.id || null;
+          }).filter((value) => typeof value === "string").slice(0, 1000)
+        : [];
+      if (!quota) return { ok: false };
+      return {
+        ok: true,
+        userQuota: {
+          total: quota.total,
+          used: quota.used,
+          remaining: quota.remaining,
+          percentage: quota.percentage,
+          unit: quota.unit
+        },
+        pendingChatIDs
+      };
+    })
+    """
+
+    static func fetchSnapshot() async throws -> QwenDesktopSnapshot {
+        if let override = ProcessInfo.processInfo.environment[
+            "QWEN_DESKTOP_SNAPSHOT_OVERRIDE"
+        ], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            guard let attributes = try? FileManager.default.attributesOfItem(
+                atPath: url.path
+            ),
+            let fileSize = attributes[.size] as? NSNumber,
+            fileSize.intValue <= maximumFixtureSize,
+            let data = try? Data(contentsOf: url),
+            let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw QwenDesktopError.invalidResponse
+            }
+            return try QwenDesktopSnapshotParser.snapshot(from: result)
+        }
+
+        let value = try await evaluate(expression: snapshotExpression)
+        guard value["ok"] as? Bool == true else {
+            throw QwenDesktopError.invalidResponse
+        }
+        return try QwenDesktopSnapshotParser.snapshot(from: value)
+    }
+
+    static func openChat(_ chatID: String) async throws {
+        guard !chatID.isEmpty, chatID.utf8.count <= 256 else {
+            throw QwenDesktopError.invalidResponse
+        }
+        if ProcessInfo.processInfo.environment["QWEN_OPEN_CHAT_FIXTURE"] == "1" {
+            return
+        }
+        let encodedData = try JSONSerialization.data(
+            withJSONObject: [chatID],
+            options: []
+        )
+        guard let encodedArray = String(data: encodedData, encoding: .utf8),
+              encodedArray.count >= 2 else {
+            throw QwenDesktopError.invalidResponse
+        }
+        let encodedChatID = String(encodedArray.dropFirst().dropLast())
+        let expression = """
+        desktopApi.openMainWindowWithChat(\(encodedChatID))
+          .then(() => ({ ok: true }))
+          .catch(() => ({ ok: false }))
+        """
+        let value = try await evaluate(expression: expression)
+        guard value["ok"] as? Bool == true else {
+            throw QwenDesktopError.bridgeUnavailable
+        }
+    }
+
+    private static func evaluate(expression: String) async throws -> [String: Any] {
+        let ports = try listeningPorts()
+        guard !ports.isEmpty else {
+            throw QwenDesktopError.bridgeUnavailable
+        }
+        let session = localSession()
+        for port in ports {
+            let targetURLs = await targetWebSocketURLs(port: port, session: session)
+            for targetURL in targetURLs {
+                do {
+                    let responseText = try await evaluate(
+                        expression: expression,
+                        targetURL: targetURL,
+                        session: session
+                    )
+                    guard let data = responseText.data(using: .utf8),
+                          let message = try JSONSerialization.jsonObject(
+                              with: data
+                          ) as? [String: Any],
+                          let result = message["result"] as? [String: Any],
+                          result["exceptionDetails"] == nil,
+                          let remoteObject = result["result"] as? [String: Any],
+                          let value = remoteObject["value"] as? [String: Any] else {
+                        continue
+                    }
+                    session.invalidateAndCancel()
+                    return value
+                } catch {
+                    continue
+                }
+            }
+        }
+        session.invalidateAndCancel()
+        throw QwenDesktopError.bridgeUnavailable
+    }
+
+    private static func evaluate(
+        expression: String,
+        targetURL: URL,
+        session: URLSession
+    ) async throws -> String {
+        let socket = session.webSocketTask(with: targetURL)
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        let request: [String: Any] = [
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": [
+                "expression": expression,
+                "awaitPromise": true,
+                "returnByValue": true,
+            ],
+        ]
+        let requestData = try JSONSerialization.data(withJSONObject: request)
+        guard let requestText = String(data: requestData, encoding: .utf8) else {
+            throw QwenDesktopError.invalidResponse
+        }
+        try await socket.send(.string(requestText))
+
+        for _ in 0..<12 {
+            let message = try await withTimeout(seconds: 7) {
+                try await socket.receive()
+            }
+            let responseText: String
+            switch message {
+            case let .string(text):
+                responseText = text
+            case let .data(data):
+                guard let text = String(data: data, encoding: .utf8) else {
+                    continue
+                }
+                responseText = text
+            @unknown default:
+                continue
+            }
+            guard let data = responseText.data(using: .utf8),
+                  let response = try? JSONSerialization.jsonObject(
+                      with: data
+                  ) as? [String: Any],
+                  (response["id"] as? NSNumber)?.intValue == 1 else {
+                continue
+            }
+            return responseText
+        }
+        throw QwenDesktopError.timedOut
+    }
+
+    private static func listeningPorts() throws -> [Int] {
+        let applications = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleIdentifier
+        )
+        guard !applications.isEmpty else {
+            throw QwenDesktopError.appNotRunning
+        }
+        var ports = Set<Int>()
+        for application in applications {
+            let process = Process()
+            let outputPipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+            process.arguments = [
+                "-nP",
+                "-a",
+                "-p", String(application.processIdentifier),
+                "-iTCP",
+                "-sTCP:LISTEN",
+            ]
+            process.standardOutput = outputPipe
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let text = String(data: data, encoding: .utf8),
+                  let expression = try? NSRegularExpression(
+                      pattern: #":(\d{2,5})\s+\(LISTEN\)"#
+                  ) else {
+                continue
+            }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            for match in expression.matches(in: text, range: range) {
+                guard let portRange = Range(match.range(at: 1), in: text),
+                      let port = Int(text[portRange]),
+                      (1...65_535).contains(port) else {
+                    continue
+                }
+                ports.insert(port)
+            }
+        }
+        return ports.sorted()
+    }
+
+    private static func targetWebSocketURLs(
+        port: Int,
+        session: URLSession
+    ) async -> [URL] {
+        guard let versionURL = URL(
+            string: "http://127.0.0.1:\(port)/json/version"
+        ),
+        let listURL = URL(string: "http://127.0.0.1:\(port)/json/list") else {
+            return []
+        }
+        do {
+            let (versionData, versionResponse) = try await session.data(from: versionURL)
+            guard (versionResponse as? HTTPURLResponse)?.statusCode == 200,
+                  (try? JSONDecoder().decode(
+                      DevToolsVersion.self,
+                      from: versionData
+                  ).webSocketDebuggerUrl) != nil else {
+                return []
+            }
+            let (listData, listResponse) = try await session.data(from: listURL)
+            guard (listResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                return []
+            }
+            let targets = try JSONDecoder().decode([DevToolsTarget].self, from: listData)
+            return targets.compactMap {
+                guard let rawURL = $0.webSocketDebuggerUrl else { return nil }
+                return URL(string: rawURL)
+            }
+        } catch {
+            return []
+        }
+    }
+
+    private static func localSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 4
+        configuration.timeoutIntervalForResource = 8
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }
+
+    private static func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(0, seconds) * 1_000_000_000)
+                try await Task<Never, Never>.sleep(nanoseconds: nanoseconds)
+                throw QwenDesktopError.timedOut
+            }
+            guard let result = try await group.next() else {
+                throw QwenDesktopError.timedOut
+            }
+            group.cancelAll()
+            return result
+        }
     }
 }
 
@@ -326,8 +1513,7 @@ struct CodexTask: Decodable, Identifiable, Equatable, Sendable {
     }
 
     var projectName: String {
-        let name = URL(fileURLWithPath: canonicalProjectPath).lastPathComponent
-        return name.isEmpty ? "未归类" : name
+        CodexProjectNameResolver.projectName(for: canonicalProjectPath)
     }
 
     var displayState: TaskDisplayState {
@@ -1382,12 +2568,14 @@ final class TaskStore: ObservableObject {
 
     func groups(matching searchText: String) -> [TaskGroup] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let recentTasks = tasks.filter { RecentTaskPolicy.includes($0, now: now) }
+        let activeTasks = tasks.filter {
+            ActivityTaskPolicy.includes($0.displayState)
+        }
         let visibleTasks: [CodexTask]
         if query.isEmpty {
-            visibleTasks = recentTasks
+            visibleTasks = activeTasks
         } else {
-            visibleTasks = recentTasks.filter {
+            visibleTasks = activeTasks.filter {
                 $0.title.localizedCaseInsensitiveContains(query)
                     || $0.projectName.localizedCaseInsensitiveContains(query)
                     || $0.gitBranch.localizedCaseInsensitiveContains(query)
@@ -1409,7 +2597,7 @@ final class TaskStore: ObservableObject {
 
     func open(_ task: CodexTask) {
         guard let url = task.deepLink else {
-            errorMessage = "任务链接无效：\(task.id)"
+            errorMessage = "任务链接无效"
             return
         }
         guard NSWorkspace.shared.open(url) else {
@@ -1589,14 +2777,14 @@ final class CodexUsageClient: @unchecked Sendable {
             currentRequestID = nil
 
             try process.run()
-            let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
+            let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0.0"
             send([
                 "id": 1,
                 "method": "initialize",
                 "params": [
                     "clientInfo": [
-                        "name": "codex-recent-tasks-sidebar",
-                        "title": "Codex 最近任务栏",
+                        "name": "local-ai-statusbar",
+                        "title": "本机AI状态栏",
                         "version": appVersion,
                     ],
                 ],
@@ -1826,6 +3014,263 @@ final class UsageStore: ObservableObject {
     }
 }
 
+enum AgentQuotaState: Equatable {
+    case loading
+    case available(AgentQuotaDisplay, isStale: Bool)
+    case unavailable(String)
+}
+
+private struct LocalAgentTaskLoadOutcome: Sendable {
+    let sourcePath: String
+    let tasks: [LocalAgentTask]
+    let errorMessage: String?
+}
+
+@MainActor
+final class QwenStore: ObservableObject {
+    @Published private(set) var tasks: [LocalAgentTask] = []
+    @Published private(set) var quotaState: AgentQuotaState = .loading
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var sourcePath = ""
+
+    private var refreshTimer: Timer?
+    private var isRefreshInFlight = false
+    private var lastSuccessfulQuota: AgentQuotaDisplay?
+
+    init(refreshInterval: TimeInterval? = 20) {
+        refresh()
+        if let refreshInterval {
+            refreshTimer = Timer.scheduledTimer(
+                withTimeInterval: refreshInterval,
+                repeats: true
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refresh()
+                }
+            }
+            refreshTimer?.tolerance = min(3, refreshInterval / 10)
+        }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
+    }
+
+    func refresh() {
+        guard !isRefreshInFlight else { return }
+        isRefreshInFlight = true
+        Task { [weak self] in
+            let snapshot: QwenDesktopSnapshot?
+            let bridgeError: String?
+            do {
+                snapshot = try await QwenDesktopBridge.fetchSnapshot()
+                bridgeError = nil
+            } catch {
+                snapshot = nil
+                bridgeError = error.localizedDescription
+            }
+            let pendingChatIDs = snapshot?.pendingChatIDs ?? []
+            let outcome = await Task.detached(priority: .utility) {
+                do {
+                    let loaded = try QwenTaskRepository.loadActiveTasks(
+                        pendingChatIDs: pendingChatIDs
+                    )
+                    return LocalAgentTaskLoadOutcome(
+                        sourcePath: loaded.databaseURL.path,
+                        tasks: loaded.tasks,
+                        errorMessage: nil
+                    )
+                } catch {
+                    return LocalAgentTaskLoadOutcome(
+                        sourcePath: "",
+                        tasks: [],
+                        errorMessage: error.localizedDescription
+                    )
+                }
+            }.value
+            guard let self else { return }
+            self.isRefreshInFlight = false
+            if outcome.errorMessage == nil {
+                if self.tasks != outcome.tasks {
+                    self.tasks = outcome.tasks
+                }
+                self.sourcePath = outcome.sourcePath
+            }
+            self.errorMessage = outcome.errorMessage ?? bridgeError
+            if let quota = snapshot?.quota {
+                self.lastSuccessfulQuota = quota
+                self.quotaState = .available(quota, isStale: false)
+            } else if let lastSuccessfulQuota = self.lastSuccessfulQuota {
+                self.quotaState = .available(lastSuccessfulQuota, isStale: true)
+            } else {
+                self.quotaState = .unavailable(
+                    bridgeError ?? "QwenWorkCN 额度暂时不可用"
+                )
+            }
+        }
+    }
+
+    func open(_ task: LocalAgentTask) {
+        guard task.agent == .qwen else { return }
+        Task { [weak self] in
+            do {
+                try await QwenDesktopBridge.openChat(task.navigationID)
+                self?.errorMessage = nil
+            } catch {
+                self?.errorMessage = "已打开 QwenWorkCN，但暂时无法精确定位线程"
+                Self.activateQwen()
+            }
+        }
+    }
+
+    private static func activateQwen() {
+        let applications = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "cn.qwenwork.desktop.mac"
+        )
+        if let application = applications.first {
+            application.activate(options: [.activateAllWindows])
+            return
+        }
+        NSWorkspace.shared.openApplication(
+            at: URL(fileURLWithPath: "/Applications/QwenWorkCN.app"),
+            configuration: NSWorkspace.OpenConfiguration()
+        )
+    }
+}
+
+@MainActor
+final class KimiStore: ObservableObject {
+    @Published private(set) var tasks: [LocalAgentTask] = []
+    @Published private(set) var quotaState: UsageState = .loading
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var sourcePath = ""
+
+    private let usageClient = KimiUsageClient()
+    private let taskQueue = DispatchQueue(
+        label: "io.github.local-ai-statusbar.kimi-tasks",
+        qos: .utility
+    )
+    private var taskRefreshTimer: Timer?
+    private var quotaRefreshTimer: Timer?
+    private var isTaskRefreshInFlight = false
+    private var isQuotaRefreshInFlight = false
+    private var lastSuccessfulWindows: [UsageWindowDisplay]?
+
+    init(
+        taskRefreshInterval: TimeInterval? = 10,
+        quotaRefreshInterval: TimeInterval? = 60
+    ) {
+        refresh()
+        if let taskRefreshInterval {
+            taskRefreshTimer = Timer.scheduledTimer(
+                withTimeInterval: taskRefreshInterval,
+                repeats: true
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshTasks()
+                }
+            }
+            taskRefreshTimer?.tolerance = min(2, taskRefreshInterval / 10)
+        }
+        if let quotaRefreshInterval {
+            quotaRefreshTimer = Timer.scheduledTimer(
+                withTimeInterval: quotaRefreshInterval,
+                repeats: true
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshUsage()
+                }
+            }
+            quotaRefreshTimer?.tolerance = min(5, quotaRefreshInterval / 10)
+        }
+    }
+
+    deinit {
+        taskRefreshTimer?.invalidate()
+        quotaRefreshTimer?.invalidate()
+    }
+
+    func refresh() {
+        refreshTasks()
+        refreshUsage()
+    }
+
+    func refreshTasks() {
+        guard !isTaskRefreshInFlight else { return }
+        isTaskRefreshInFlight = true
+        taskQueue.async {
+            let outcome: LocalAgentTaskLoadOutcome
+            do {
+                let loaded = try KimiTaskRepository.loadActiveTasks()
+                outcome = LocalAgentTaskLoadOutcome(
+                    sourcePath: loaded.indexURL.path,
+                    tasks: loaded.tasks,
+                    errorMessage: nil
+                )
+            } catch {
+                outcome = LocalAgentTaskLoadOutcome(
+                    sourcePath: "",
+                    tasks: [],
+                    errorMessage: error.localizedDescription
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isTaskRefreshInFlight = false
+                if outcome.errorMessage == nil {
+                    if self.tasks != outcome.tasks {
+                        self.tasks = outcome.tasks
+                    }
+                    self.sourcePath = outcome.sourcePath
+                }
+                self.errorMessage = outcome.errorMessage
+            }
+        }
+    }
+
+    func refreshUsage() {
+        guard !isQuotaRefreshInFlight else { return }
+        isQuotaRefreshInFlight = true
+        usageClient.refresh { result in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isQuotaRefreshInFlight = false
+                switch result {
+                case let .success(windows):
+                    self.lastSuccessfulWindows = windows
+                    self.quotaState = .available(windows, isStale: false)
+                case let .failure(error):
+                    if let lastSuccessfulWindows = self.lastSuccessfulWindows {
+                        self.quotaState = .available(
+                            lastSuccessfulWindows,
+                            isStale: true
+                        )
+                    } else {
+                        self.quotaState = .unavailable(error.localizedDescription)
+                    }
+                }
+            }
+        }
+    }
+
+    func open(_ task: LocalAgentTask) {
+        guard task.agent == .kimi,
+              let url = URL(string: "kimi-work://home") else {
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            errorMessage = "无法打开 Kimi Agent 页面"
+            return
+        }
+        errorMessage = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.moonshot.kimichat"
+            ).first?.activate(options: [.activateAllWindows])
+        }
+    }
+}
+
 struct RecentTaskRowView: View {
     let projectName: String
     let task: CodexTask
@@ -1889,7 +3334,7 @@ struct RecentTaskRowView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help("\(projectName)\n任务：\(task.title)\n状态：\(displayState.statusDescription)\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))\nThread ID：\(task.id)")
+        .help("\(projectName)\n任务：\(task.title)\n状态：\(displayState.statusDescription)\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))")
         .accessibilityLabel("\(projectName)，任务 \(task.title)，\(displayState.statusDescription)，最近活动 \(shortTime)")
         .accessibilityHint("打开这条 Codex 任务")
     }
@@ -1926,7 +3371,7 @@ struct FolderTaskSectionView: View {
             .padding(.top, 10)
             .padding(.bottom, 6)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("文件夹 \(group.name)，最近 48 小时 \(group.tasks.count) 条任务")
+            .accessibilityLabel("项目 \(group.name)，\(group.tasks.count) 个活动线程")
 
             ForEach(Array(group.tasks.enumerated()), id: \.element.id) { index, task in
                 if index > 0 {
@@ -1976,7 +3421,13 @@ struct TaskListView: View {
 
             footer
         }
-        .frame(minWidth: 300, idealWidth: 360, minHeight: 420, idealHeight: 720)
+        .frame(
+            minWidth: AppLayout.panelWidth,
+            idealWidth: AppLayout.panelWidth,
+            maxWidth: AppLayout.panelWidth,
+            minHeight: AppLayout.minimumPanelHeight,
+            idealHeight: AppLayout.idealPanelHeight
+        )
         .background(.regularMaterial)
     }
 
@@ -1988,9 +3439,9 @@ struct TaskListView: View {
                     .foregroundStyle(Color.accentColor)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Codex 最近任务")
+                    Text("本机AI状态栏")
                         .font(.system(size: 15, weight: .semibold))
-                    Text("\(groups.count) 个文件夹 · \(visibleTaskCount) 个任务 · 最近 48 小时")
+                    Text("\(groups.count) 个项目 · \(visibleTaskCount) 个活动线程")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -2258,7 +3709,7 @@ struct TaskListView: View {
                 Image(systemName: searchText.isEmpty ? "tray" : "magnifyingglass")
                     .font(.system(size: 25))
                     .foregroundStyle(.tertiary)
-                Text(searchText.isEmpty ? "最近 48 小时没有任务" : "最近 48 小时没有匹配的任务")
+                Text(searchText.isEmpty ? "当前没有活动线程" : "没有匹配的活动线程")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -2292,7 +3743,550 @@ struct TaskListView: View {
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 14)
         .frame(height: 30)
-        .help(store.databasePath)
+        .help("本机只读状态")
+    }
+}
+
+struct ActivityRowModel: Identifiable, Equatable {
+    let id: String
+    let nativeID: String
+    let agent: AgentKind
+    let title: String
+    let projectName: String
+    let projectPath: String
+    let updatedMillis: Int64
+    let displayState: TaskDisplayState
+}
+
+struct ActivityProjectGroup: Identifiable {
+    let id: String
+    let name: String
+    let tasks: [ActivityRowModel]
+
+    var latestUpdate: Int64 {
+        tasks.first?.updatedMillis ?? 0
+    }
+
+    static func grouped(_ tasks: [ActivityRowModel]) -> [ActivityProjectGroup] {
+        Dictionary(grouping: tasks, by: \.projectPath).map { path, projectTasks in
+            let sortedTasks = projectTasks.sorted {
+                if $0.updatedMillis == $1.updatedMillis { return $0.id < $1.id }
+                return $0.updatedMillis > $1.updatedMillis
+            }
+            return ActivityProjectGroup(
+                id: path,
+                name: sortedTasks.first?.projectName ?? "未归类",
+                tasks: sortedTasks
+            )
+        }.sorted {
+            if $0.latestUpdate == $1.latestUpdate { return $0.name < $1.name }
+            return $0.latestUpdate > $1.latestUpdate
+        }
+    }
+}
+
+struct CompactActivityRowView: View {
+    let task: ActivityRowModel
+    let now: Date
+    let openTask: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: openTask) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(task.displayState.tintColor)
+                    .frame(width: 5, height: 5)
+
+                Text(task.title)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 3)
+
+                Text(task.displayState.badgeText ?? "活动")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(task.displayState.tintColor)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .background(
+                isHovering ? Color.primary.opacity(0.055) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(
+            "\(task.projectName)\n线程：\(task.title)\n状态：\(task.displayState.statusDescription)\n最近活动：\(TimeLabelFormatter.fullLabel(milliseconds: task.updatedMillis))"
+        )
+        .accessibilityLabel(
+            "\(task.agent.displayName)，\(task.projectName)，线程 \(task.title)，\(task.displayState.statusDescription)"
+        )
+    }
+}
+
+struct CompactAgentSectionView: View {
+    let agent: AgentKind
+    let quotaText: String
+    let quotaTint: Color
+    let quotaHelp: String
+    let tasks: [ActivityRowModel]
+    let now: Date
+    let openTask: (String) -> Void
+
+    private var groups: [ActivityProjectGroup] {
+        ActivityProjectGroup.grouped(tasks)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: agent.symbolName)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(agentTint)
+                    .frame(width: 14)
+
+                Text(agent.displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+
+                Text("\(tasks.count)")
+                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(tasks.isEmpty ? Color.secondary : agentTint)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        (tasks.isEmpty ? Color.secondary : agentTint).opacity(0.1),
+                        in: Capsule()
+                    )
+
+                Spacer(minLength: 4)
+
+                Text(quotaText)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(quotaTint)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(quotaHelp)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+
+            if groups.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 9))
+                    Text("无活动线程")
+                        .font(.system(size: 9.5))
+                }
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 29)
+                .frame(height: 26)
+            } else {
+                VStack(spacing: 5) {
+                    ForEach(groups) { group in
+                        VStack(spacing: 1) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                                Text(group.name)
+                                    .font(.system(size: 9.3, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 19)
+
+                            ForEach(group.tasks) { task in
+                                CompactActivityRowView(task: task, now: now) {
+                                    openTask(task.nativeID)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 2)
+                        .background(
+                            Color.primary.opacity(0.025),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 7)
+            }
+        }
+        .background(Color.primary.opacity(0.018))
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.35)
+        }
+    }
+
+    private var agentTint: Color {
+        switch agent {
+        case .codex:
+            return .blue
+        case .qwen:
+            return .purple
+        case .kimi:
+            return .indigo
+        }
+    }
+}
+
+struct LocalAIStatusView: View {
+    @ObservedObject var codexStore: TaskStore
+    @ObservedObject var codexUsageStore: UsageStore
+    @ObservedObject var qwenStore: QwenStore
+    @ObservedObject var kimiStore: KimiStore
+    @ObservedObject var windowMode: WindowModeModel
+
+    private var codexTasks: [ActivityRowModel] {
+        codexStore.groups(matching: "").flatMap { group in
+            group.tasks.map { task in
+                ActivityRowModel(
+                    id: "codex:\(task.id)",
+                    nativeID: task.id,
+                    agent: .codex,
+                    title: task.title,
+                    projectName: group.name,
+                    projectPath: task.canonicalProjectPath,
+                    updatedMillis: task.updatedMillis,
+                    displayState: task.displayState
+                )
+            }
+        }
+    }
+
+    private var qwenTasks: [ActivityRowModel] {
+        qwenStore.tasks.map { task in
+            ActivityRowModel(
+                id: "qwen:\(task.id)",
+                nativeID: task.id,
+                agent: .qwen,
+                title: task.title,
+                projectName: task.projectName,
+                projectPath: task.projectPath,
+                updatedMillis: task.updatedMillis,
+                displayState: task.displayState
+            )
+        }
+    }
+
+    private var kimiTasks: [ActivityRowModel] {
+        kimiStore.tasks.map { task in
+            ActivityRowModel(
+                id: "kimi:\(task.id)",
+                nativeID: task.id,
+                agent: .kimi,
+                title: task.title,
+                projectName: task.projectName,
+                projectPath: task.projectPath,
+                updatedMillis: task.updatedMillis,
+                displayState: task.displayState
+            )
+        }
+    }
+
+    private var totalActiveCount: Int {
+        codexTasks.count + qwenTasks.count + kimiTasks.count
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            compactHeader
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    CompactAgentSectionView(
+                        agent: .codex,
+                        quotaText: codexQuota.text,
+                        quotaTint: codexQuota.tint,
+                        quotaHelp: codexQuota.help,
+                        tasks: codexTasks,
+                        now: codexStore.now,
+                        openTask: openCodexTask
+                    )
+                    CompactAgentSectionView(
+                        agent: .qwen,
+                        quotaText: qwenQuota.text,
+                        quotaTint: qwenQuota.tint,
+                        quotaHelp: qwenQuota.help,
+                        tasks: qwenTasks,
+                        now: codexStore.now,
+                        openTask: openQwenTask
+                    )
+                    CompactAgentSectionView(
+                        agent: .kimi,
+                        quotaText: kimiQuota.text,
+                        quotaTint: kimiQuota.tint,
+                        quotaHelp: kimiQuota.help,
+                        tasks: kimiTasks,
+                        now: codexStore.now,
+                        openTask: openKimiTask
+                    )
+                }
+            }
+            .scrollIndicators(.automatic)
+
+            compactFooter
+        }
+        .frame(
+            minWidth: AppLayout.panelWidth,
+            idealWidth: AppLayout.panelWidth,
+            maxWidth: AppLayout.panelWidth,
+            minHeight: AppLayout.minimumPanelHeight,
+            idealHeight: AppLayout.idealPanelHeight
+        )
+        .background(.regularMaterial)
+    }
+
+    private var compactHeader: some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 7) {
+                Image(systemName: "waveform.path.ecg.rectangle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("本机AI状态栏")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Text("\(totalActiveCount) 个活动线程 · 全局置顶")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 2)
+
+                Button {
+                    windowMode.select(
+                        windowMode.mode == .pinned ? .docked : .pinned
+                    )
+                } label: {
+                    Image(
+                        systemName: windowMode.mode == .pinned
+                            ? "rectangle.leadinghalf.inset.filled" : "pin.fill"
+                    )
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .frame(width: 23, height: 23)
+                }
+                .buttonStyle(.plain)
+                .background(Color.primary.opacity(0.055), in: Circle())
+                .help(
+                    windowMode.mode == .pinned
+                        ? "吸附到 Codex 底边" : "切换为自由置顶"
+                )
+
+                Button(action: refreshAll) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .frame(width: 23, height: 23)
+                }
+                .buttonStyle(.plain)
+                .background(Color.primary.opacity(0.055), in: Circle())
+                .help("立即刷新三类 Agent")
+            }
+            .contentShape(Rectangle())
+            .gesture(headerDragGesture)
+
+            if windowMode.mode == .docked {
+                HStack(spacing: 5) {
+                    Text("吸附")
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                    compactDockButton(side: .left)
+                    compactDockButton(side: .right)
+                    Spacer()
+                    Text("底边对齐")
+                        .font(.system(size: 8.8))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.top, 9)
+        .padding(.bottom, 7)
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.4)
+        }
+    }
+
+    private var headerDragGesture: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onChanged { value in
+                if windowMode.mode == .pinned {
+                    windowMode.dragPinnedWindow(
+                        translation: value.translation,
+                        ended: false
+                    )
+                }
+            }
+            .onEnded { value in
+                if windowMode.mode == .pinned {
+                    windowMode.dragPinnedWindow(
+                        translation: value.translation,
+                        ended: true
+                    )
+                } else if abs(value.translation.width) >= 36,
+                          abs(value.translation.width) > abs(value.translation.height) {
+                    windowMode.selectDockSide(
+                        value.translation.width < 0 ? .left : .right
+                    )
+                }
+            }
+    }
+
+    private func compactDockButton(side: DockSide) -> some View {
+        let selected = windowMode.dockSide == side
+        return Button {
+            windowMode.selectDockSide(side)
+        } label: {
+            Text(side.label)
+                .font(.system(size: 8.8, weight: .semibold))
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 19)
+                .background(
+                    selected
+                        ? Color.accentColor.opacity(0.12)
+                        : Color.primary.opacity(0.04),
+                    in: Capsule()
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var compactFooter: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(overallStatusColor)
+                .frame(width: 5, height: 5)
+            Text(windowMode.statusText)
+                .lineLimit(1)
+            Spacer(minLength: 3)
+            Text("自动刷新")
+        }
+        .font(.system(size: 8.8))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 9)
+        .frame(height: 25)
+        .overlay(alignment: .top) {
+            Divider().opacity(0.4)
+        }
+    }
+
+    private var overallStatusColor: Color {
+        if codexStore.errorMessage != nil
+            && qwenStore.errorMessage != nil
+            && kimiStore.errorMessage != nil {
+            return .orange
+        }
+        return .green
+    }
+
+    private var codexQuota: (text: String, tint: Color, help: String) {
+        quotaSummary(codexUsageStore.state, source: "Codex")
+    }
+
+    private var qwenQuota: (text: String, tint: Color, help: String) {
+        switch qwenStore.quotaState {
+        case .loading:
+            return ("读取中", .secondary, "正在读取 QwenWorkCN 剩余积分")
+        case let .available(quota, isStale):
+            let value = quota.remainingValueText.map { "余\($0)分" }
+                ?? "余\(quota.remainingPercent)%"
+            return (
+                isStale ? "\(value) · 延迟" : value,
+                isStale ? .orange : quotaColor(quota.remainingPercent),
+                isStale
+                    ? "当前显示上次成功读取的 QwenWorkCN 剩余积分"
+                    : "QwenWorkCN 剩余积分 \(value)"
+            )
+        case let .unavailable(message):
+            return ("额度不可用", .orange, message)
+        }
+    }
+
+    private var kimiQuota: (text: String, tint: Color, help: String) {
+        quotaSummary(kimiStore.quotaState, source: "Kimi")
+    }
+
+    private func quotaSummary(
+        _ state: UsageState,
+        source: String
+    ) -> (text: String, tint: Color, help: String) {
+        switch state {
+        case .loading:
+            return ("读取中", .secondary, "正在读取 \(source) 剩余额度")
+        case let .available(windows, isStale):
+            let summary = windows.map {
+                "\(compactQuotaLabel($0.label)) \($0.remainingPercent)%"
+            }.joined(separator: " · ")
+            let minimum = windows.map(\.remainingPercent).min() ?? 100
+            return (
+                isStale ? "\(summary) · 延迟" : summary,
+                isStale ? .orange : quotaColor(minimum),
+                isStale
+                    ? "当前显示上次成功读取的 \(source) 剩余额度"
+                    : "\(source) 剩余额度：\(summary)"
+            )
+        case let .unavailable(message):
+            return ("额度不可用", .orange, message)
+        }
+    }
+
+    private func compactQuotaLabel(_ label: String) -> String {
+        switch label {
+        case "5 小时":
+            return "5时"
+        case "每周":
+            return "周"
+        case "每月":
+            return "月"
+        default:
+            return label
+        }
+    }
+
+    private func quotaColor(_ remainingPercent: Int) -> Color {
+        if remainingPercent <= 10 { return .red }
+        if remainingPercent <= 30 { return .orange }
+        return .secondary
+    }
+
+    private func refreshAll() {
+        codexStore.refresh()
+        codexUsageStore.refresh()
+        qwenStore.refresh()
+        kimiStore.refresh()
+    }
+
+    private func openCodexTask(_ id: String) {
+        guard let task = codexStore.tasks.first(where: { $0.id == id }) else {
+            return
+        }
+        codexStore.open(task)
+    }
+
+    private func openQwenTask(_ id: String) {
+        guard let task = qwenStore.tasks.first(where: { $0.id == id }) else {
+            return
+        }
+        qwenStore.open(task)
+    }
+
+    private func openKimiTask(_ id: String) {
+        guard let task = kimiStore.tasks.first(where: { $0.id == id }) else {
+            return
+        }
+        kimiStore.open(task)
     }
 }
 
@@ -2300,6 +4294,8 @@ struct TaskListView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let store = TaskStore()
     private let usageStore = UsageStore()
+    private let qwenStore = QwenStore()
+    private let kimiStore = KimiStore()
     private let windowMode = WindowModeModel()
     private var panel: NSPanel?
     private var statusItem: NSStatusItem?
@@ -2325,7 +4321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         createPanel()
         createStatusItem()
-        applyWindowMode(.docked)
+        applyWindowMode(windowMode.mode)
         showPanel()
     }
 
@@ -2347,12 +4343,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func createPanel() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 680),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: AppLayout.panelWidth,
+                height: AppLayout.idealPanelHeight
+            ),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Codex 最近任务"
+        panel.title = "本机AI状态栏"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -2361,19 +4362,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.minSize = NSSize(width: 300, height: 420)
-        panel.maxSize = NSSize(width: 560, height: 1200)
+        panel.minSize = NSSize(
+            width: AppLayout.panelWidth,
+            height: AppLayout.minimumPanelHeight
+        )
+        panel.maxSize = NSSize(width: AppLayout.panelWidth, height: 1200)
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.delegate = self
-        panel.setFrameAutosaveName("CodexRecentTasksPanelFrame")
+        panel.setFrameAutosaveName("LocalAIStatusBarPanelFrame")
         panel.contentView = NSHostingView(
-            rootView: TaskListView(store: store, usageStore: usageStore, windowMode: windowMode)
+            rootView: LocalAIStatusView(
+                codexStore: store,
+                codexUsageStore: usageStore,
+                qwenStore: qwenStore,
+                kimiStore: kimiStore,
+                windowMode: windowMode
+            )
         )
 
-        if !panel.setFrameUsingName("CodexRecentTasksPanelFrame"), let screen = NSScreen.main {
+        if !panel.setFrameUsingName("LocalAIStatusBarPanelFrame"), let screen = NSScreen.main {
             let visible = screen.visibleFrame
             panel.setFrameTopLeftPoint(NSPoint(x: visible.minX + 12, y: visible.maxY - 12))
+        } else if panel.frame.width != AppLayout.panelWidth {
+            var frame = panel.frame
+            frame.size.width = AppLayout.panelWidth
+            panel.setFrame(frame, display: false)
         }
 
         self.panel = panel
@@ -2388,6 +4402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch mode {
         case .docked:
             panel.hidesOnDeactivate = false
+            panel.isFloatingPanel = true
+            panel.level = .statusBar
             dockToCodexWindow()
             dockTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
                 Task { @MainActor in
@@ -2399,7 +4415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.isFloatingPanel = true
             panel.level = .statusBar
             recordWindowLayerState("pinned")
-            updateWindowStatus("单独置顶 · 点击任务跳转 Codex")
+            updateWindowStatus("自由置顶 · 三类 Agent")
             panel.orderFrontRegardless()
         }
     }
@@ -2411,7 +4427,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard let codexFrame = CodexWindowLocator.largestWindowFrame() else {
-            updateWindowStatus("等待 Codex 窗口")
+            panel.isFloatingPanel = true
+            panel.level = .statusBar
+            panel.orderFrontRegardless()
+            updateWindowStatus("等待 Codex · 仍全局置顶")
             return
         }
 
@@ -2479,7 +4498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.setFrameOrigin(targetOrigin)
 
         if ended {
-            panel.saveFrame(usingName: "CodexRecentTasksPanelFrame")
+            panel.saveFrame(usingName: "LocalAIStatusBarPanelFrame")
             pinnedDragStartOrigin = nil
         }
     }
@@ -2492,30 +4511,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard windowMode.mode == .docked, let panel else { return }
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let ownBundleID = Bundle.main.bundleIdentifier
-        let shouldBeFront = frontmostBundleID == "com.openai.codex" || frontmostBundleID == ownBundleID
-
-        if shouldBeFront {
-            if panel.level != .floating || !panel.isFloatingPanel {
-                panel.isFloatingPanel = true
-                panel.level = .floating
-                panel.orderFrontRegardless()
-            }
-        } else if panel.level != .normal || panel.isFloatingPanel {
-            panel.level = .normal
-            panel.isFloatingPanel = false
-            panel.orderBack(nil)
-        }
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.orderFrontRegardless()
 
         let foregroundState: String
         if frontmostBundleID == "com.openai.codex" {
-            foregroundState = "跟随 Codex 前置"
+            foregroundState = "Codex 前台"
         } else if frontmostBundleID == ownBundleID {
             foregroundState = "正在操作"
         } else {
-            foregroundState = "已随 Codex 后置"
+            foregroundState = "其他程序前台"
         }
-        recordWindowLayerState(shouldBeFront ? "front" : "back", frontmostBundleID: frontmostBundleID)
-        updateWindowStatus("已吸附 \(windowMode.dockSide.label) · \(foregroundState)")
+        recordWindowLayerState("always-on-top", frontmostBundleID: frontmostBundleID)
+        updateWindowStatus("吸附\(windowMode.dockSide.label) · \(foregroundState)")
     }
 
     private func recordWindowLayerState(_ state: String, frontmostBundleID: String? = nil) {
@@ -2536,13 +4546,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func createStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Codex 最近任务")
-            button.toolTip = "Codex 最近任务"
+            button.image = NSImage(
+                systemSymbolName: "waveform.path.ecg.rectangle",
+                accessibilityDescription: "本机AI状态栏"
+            )
+            button.toolTip = "本机AI状态栏"
         }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "显示任务栏", action: #selector(showPanel), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "刷新任务与用量", action: #selector(refreshTasks), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "显示状态栏", action: #selector(showPanel), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "刷新三类 Agent", action: #selector(refreshTasks), keyEquivalent: "r"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
@@ -2554,6 +4567,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let panel else { return }
         store.refresh()
         usageStore.refresh()
+        qwenStore.refresh()
+        kimiStore.refresh()
         if windowMode.mode == .docked {
             dockToCodexWindow()
         }
@@ -2564,6 +4579,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func refreshTasks() {
         store.refresh()
         usageStore.refresh()
+        qwenStore.refresh()
+        kimiStore.refresh()
         panel?.orderFrontRegardless()
     }
 
@@ -2667,7 +4684,7 @@ enum SelfTest {
 
             let visibleFrame = NSRect(x: 0, y: 0, width: 1800, height: 1000)
             let codexFrame = NSRect(x: 400, y: 100, width: 1000, height: 800)
-            let panelSize = NSSize(width: 320, height: 680)
+            let panelSize = NSSize(width: 240, height: 680)
             let leftOrigin = DockPlacement.targetOrigin(
                 codexFrame: codexFrame,
                 panelSize: panelSize,
@@ -2870,6 +4887,28 @@ enum SelfTest {
                 return 25
             }
 
+            let sanitizedEnvironment = KimiProcessEnvironment.sanitized([
+                "HOME": "/tmp/synthetic-home",
+                "PATH": "/usr/bin:/bin",
+                "__CF_USER_TEXT_ENCODING": "synthetic",
+                "CODEX_THREAD_ID": "synthetic-thread",
+                "OPENAI_API_KEY": "synthetic-key",
+                "SERVICE_TOKEN": "synthetic-token",
+                "DATABASE_URL": "synthetic-database",
+                "SSH_AUTH_SOCK": "/tmp/synthetic-auth",
+            ])
+            guard sanitizedEnvironment["HOME"] == "/tmp/synthetic-home",
+                  sanitizedEnvironment["PATH"] == "/usr/bin:/bin",
+                  sanitizedEnvironment["__CF_USER_TEXT_ENCODING"] == "synthetic",
+                  sanitizedEnvironment["CODEX_THREAD_ID"] == nil,
+                  sanitizedEnvironment["OPENAI_API_KEY"] == nil,
+                  sanitizedEnvironment["SERVICE_TOKEN"] == nil,
+                  sanitizedEnvironment["DATABASE_URL"] == nil,
+                  sanitizedEnvironment["SSH_AUTH_SOCK"] == nil else {
+                fputs("SELF_TEST_FAILED Kimi process environment filtering\n", stderr)
+                return 33
+            }
+
             let qwenRunning = QwenTaskStatusParser.runtimeState(
                 taskStatus: "running",
                 streamID: nil
@@ -2925,7 +4964,7 @@ enum SelfTest {
             guard kimiTasks.count == 1,
                   kimiTasks.first?.id == "kimi-running",
                   kimiTasks.first?.title == "Kimi 中文运行线程",
-                  kimiTasks.first?.projectName == "kimi-project-1",
+                  kimiTasks.first?.projectName == "Kimi中文项目",
                   kimiTasks.first?.displayState == .running else {
                 fputs("SELF_TEST_FAILED Kimi active task repository\n", stderr)
                 return 31
@@ -2955,7 +4994,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
@@ -3076,6 +5115,260 @@ enum UsageResilienceSelfTest {
     }
 }
 
+enum QwenBridgeSelfTest {
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<QwenDesktopSnapshot, Error>?
+
+        func store(_ newValue: Result<QwenDesktopSnapshot, Error>) {
+            lock.lock()
+            result = newValue
+            lock.unlock()
+        }
+
+        func load() -> Result<QwenDesktopSnapshot, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
+    static func run(expectFixtureValues: Bool = true) -> Int32 {
+        let resultBox = ResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                resultBox.store(.success(try await QwenDesktopBridge.fetchSnapshot()))
+            } catch {
+                resultBox.store(.failure(error))
+            }
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 12) == .success else {
+            fputs("QWEN_BRIDGE_SELF_TEST_FAILED timeout\n", stderr)
+            return 40
+        }
+        switch resultBox.load() {
+        case let .success(snapshot):
+            if expectFixtureValues {
+                guard snapshot.quota == AgentQuotaDisplay(
+                    label: "积分",
+                    remainingPercent: 72,
+                    remainingValueText: "724.5"
+                ),
+                snapshot.pendingChatIDs == Set(["qwen-chat-review"]) else {
+                    fputs("QWEN_BRIDGE_SELF_TEST_FAILED unexpected values\n", stderr)
+                    return 41
+                }
+                print("QWEN_BRIDGE_SELF_TEST_OK pending=1 quota=ok")
+            } else {
+                print(
+                    "QWEN_BRIDGE_PROBE_OK pending=\(snapshot.pendingChatIDs.count) quota=ok"
+                )
+            }
+            return 0
+        case let .failure(error):
+            fputs(
+                "QWEN_BRIDGE_SELF_TEST_FAILED \(error.localizedDescription)\n",
+                stderr
+            )
+            return 42
+        case nil:
+            fputs("QWEN_BRIDGE_SELF_TEST_FAILED no result\n", stderr)
+            return 43
+        }
+    }
+}
+
+enum KimiUsageSelfTest {
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<[UsageWindowDisplay], Error>?
+
+        func store(_ newValue: Result<[UsageWindowDisplay], Error>) {
+            lock.lock()
+            result = newValue
+            lock.unlock()
+        }
+
+        func load() -> Result<[UsageWindowDisplay], Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
+    static func run(expectFixtureValues: Bool = true) -> Int32 {
+        let client = KimiUsageClient()
+        let resultBox = ResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        client.refresh { result in
+            resultBox.store(result)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 22) == .success else {
+            fputs("KIMI_USAGE_SELF_TEST_FAILED timeout\n", stderr)
+            return 50
+        }
+        switch resultBox.load() {
+        case let .success(windows):
+            if expectFixtureValues {
+                guard windows == [
+                    UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
+                    UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                ] else {
+                    fputs("KIMI_USAGE_SELF_TEST_FAILED unexpected values\n", stderr)
+                    return 51
+                }
+                print("KIMI_USAGE_SELF_TEST_OK windows=2")
+            } else {
+                print("KIMI_USAGE_PROBE_OK windows=\(windows.count)")
+            }
+            return 0
+        case let .failure(error):
+            fputs(
+                "KIMI_USAGE_SELF_TEST_FAILED \(error.localizedDescription)\n",
+                stderr
+            )
+            return 52
+        case nil:
+            fputs("KIMI_USAGE_SELF_TEST_FAILED no result\n", stderr)
+            return 53
+        }
+    }
+}
+
+enum LiveActivityProbe {
+    private final class QwenResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Int, Error>?
+
+        func store(_ newValue: Result<Int, Error>) {
+            lock.lock()
+            result = newValue
+            lock.unlock()
+        }
+
+        func load() -> Result<Int, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
+    static func run() -> Int32 {
+        do {
+            let codexCount = try TaskRepository.loadTasks().tasks.filter {
+                ActivityTaskPolicy.includes($0.displayState)
+            }.count
+            let kimiCount = try KimiTaskRepository.loadActiveTasks().tasks.count
+
+            let qwenBox = QwenResultBox()
+            let semaphore = DispatchSemaphore(value: 0)
+            Task {
+                do {
+                    let snapshot = try await QwenDesktopBridge.fetchSnapshot()
+                    let count = try QwenTaskRepository.loadActiveTasks(
+                        pendingChatIDs: snapshot.pendingChatIDs
+                    ).tasks.count
+                    qwenBox.store(.success(count))
+                } catch {
+                    qwenBox.store(.failure(error))
+                }
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + 12) == .success,
+                  case let .success(qwenCount) = qwenBox.load() else {
+                fputs("ACTIVITY_PROBE_FAILED source=qwen\n", stderr)
+                return 61
+            }
+            print(
+                "ACTIVITY_PROBE_OK codex=\(codexCount) qwen=\(qwenCount) kimi=\(kimiCount)"
+            )
+            return 0
+        } catch {
+            fputs("ACTIVITY_PROBE_FAILED source=local\n", stderr)
+            return 60
+        }
+    }
+}
+
+enum LiveNavigationProbe {
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var succeeded: Bool?
+
+        func store(_ newValue: Bool) {
+            lock.lock()
+            succeeded = newValue
+            lock.unlock()
+        }
+
+        func load() -> Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return succeeded
+        }
+    }
+
+    static func run(agent: String) -> Int32 {
+        switch agent {
+        case AgentKind.codex.rawValue:
+            do {
+                guard let task = try TaskRepository.loadTasks().tasks.first(
+                    where: { ActivityTaskPolicy.includes($0.displayState) }
+                ) else {
+                    print("NAVIGATION_PROBE_SKIPPED agent=codex reason=no_active")
+                    return 0
+                }
+                guard let deepLink = task.deepLink,
+                      NSWorkspace.shared.open(deepLink) else {
+                    fputs("NAVIGATION_PROBE_FAILED agent=codex\n", stderr)
+                    return 70
+                }
+                print("NAVIGATION_PROBE_OK agent=codex exact=true")
+                return 0
+            } catch {
+                fputs("NAVIGATION_PROBE_FAILED agent=codex\n", stderr)
+                return 71
+            }
+        case AgentKind.qwen.rawValue:
+            let resultBox = ResultBox()
+            let semaphore = DispatchSemaphore(value: 0)
+            Task {
+                do {
+                    let snapshot = try await QwenDesktopBridge.fetchSnapshot()
+                    guard let task = try QwenTaskRepository.loadActiveTasks(
+                        pendingChatIDs: snapshot.pendingChatIDs
+                    ).tasks.first else {
+                        resultBox.store(false)
+                        semaphore.signal()
+                        return
+                    }
+                    try await QwenDesktopBridge.openChat(task.navigationID)
+                    resultBox.store(true)
+                } catch {
+                    resultBox.store(false)
+                }
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + 12) == .success else {
+                fputs("NAVIGATION_PROBE_FAILED agent=qwen\n", stderr)
+                return 72
+            }
+            guard resultBox.load() == true else {
+                print("NAVIGATION_PROBE_SKIPPED agent=qwen reason=no_active_or_bridge")
+                return 0
+            }
+            print("NAVIGATION_PROBE_OK agent=qwen exact=true")
+            return 0
+        default:
+            fputs("NAVIGATION_PROBE_FAILED agent=unsupported\n", stderr)
+            return 73
+        }
+    }
+}
+
 @main
 struct CodexRecentTasksMain {
     @MainActor
@@ -3091,6 +5384,31 @@ struct CodexRecentTasksMain {
         }
         if CommandLine.arguments.contains("--usage-probe") {
             Darwin.exit(UsageClientSelfTest.run(expectFixtureValues: false))
+        }
+        if CommandLine.arguments.contains("--qwen-bridge-self-test") {
+            Darwin.exit(QwenBridgeSelfTest.run())
+        }
+        if CommandLine.arguments.contains("--qwen-bridge-probe") {
+            Darwin.exit(QwenBridgeSelfTest.run(expectFixtureValues: false))
+        }
+        if CommandLine.arguments.contains("--kimi-usage-self-test") {
+            Darwin.exit(KimiUsageSelfTest.run())
+        }
+        if CommandLine.arguments.contains("--kimi-usage-probe") {
+            Darwin.exit(KimiUsageSelfTest.run(expectFixtureValues: false))
+        }
+        if CommandLine.arguments.contains("--activity-probe") {
+            Darwin.exit(LiveActivityProbe.run())
+        }
+        if let navigationIndex = CommandLine.arguments.firstIndex(
+            of: "--navigation-probe"
+        ),
+        CommandLine.arguments.indices.contains(navigationIndex + 1) {
+            Darwin.exit(
+                LiveNavigationProbe.run(
+                    agent: CommandLine.arguments[navigationIndex + 1]
+                )
+            )
         }
 
         let application = NSApplication.shared
