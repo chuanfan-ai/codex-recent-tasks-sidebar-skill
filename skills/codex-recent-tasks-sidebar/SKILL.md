@@ -14,11 +14,12 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
 4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three supported agents, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, WorkBuddy/TRAE Work adapter contracts, failure isolation, input hashes, signing, and redaction.
 5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
-6. Verify the live application without exposing task content:
+6. Run `scripts/launch_synthetic_ui_qa.sh --launch` and verify the real macOS window with synthetic task fixtures. Do not inspect the accessibility tree or screenshots of the user's live task window.
+7. Verify:
    - custom icon, Dock entry, and menu bar item exist;
    - the window width is 240 points and text remains readable;
    - only running, waiting-for-action, and pending-review threads appear;
-   - real Chinese project and thread names are preserved;
+   - synthetic Chinese fixture project and thread names are preserved;
    - pinned and docked modes both stay above other applications;
    - left and right docking align the panel with the Codex bottom edge;
    - Codex opens the exact `codex://threads/{id}` target;

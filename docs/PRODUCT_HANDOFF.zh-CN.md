@@ -13,6 +13,7 @@
 - 首批外部灰测计划：`docs/FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md`
 - 构建入口：`scripts/build_app.sh`
 - 完整验收入口：`scripts/qa.sh`
+- 合成桌面验收入口：`scripts/launch_synthetic_ui_qa.sh`
 - 产品 Skill：`skills/codex-recent-tasks-sidebar/SKILL.md`
 
 继续开发前，按以下顺序读取：
@@ -110,6 +111,7 @@
 ├── scripts/
 │   ├── build_app.sh                 根构建入口
 │   ├── generate_app_icon.swift      图标生成
+│   ├── launch_synthetic_ui_qa.sh    合成数据桌面验收副本
 │   └── qa.sh                        构建、签名、测试、自检、脱敏
 ├── tests/
 │   └── AgentAdapterContractTests.swift
@@ -141,10 +143,15 @@
 - 活动线程、待查看、项目分组和中文名称
 - 三类额度解析、故障恢复和窄栏文案
 - WorkBuddy 与 TRAE Work 的精确 Bundle 匹配、TRAE IDE 排除、元数据最小化和适配器故障隔离
+- 独立 Bundle ID 的合成桌面验收副本，阻止布局工具接触真实任务标题
 - 输入文件只读哈希比对
 - 自检和脱敏扫描
 
 高风险交互改动还需要真实启动验收：
+
+```bash
+./scripts/launch_synthetic_ui_qa.sh --launch
+```
 
 - 图标和 Dock 行为正确
 - 240 像素宽度和全局置顶正确
@@ -153,6 +160,8 @@
 - Codex、QwenWorkCN 点击后精确跳转
 - Kimi 只承诺打开 Agent 首页
 - WorkBuddy 与 TRAE Work 只显示安装、运行和支持等级；点击只打开对应应用
+
+桌面布局与可访问性检查必须在合成副本中完成。真实应用只允许做不回传标题或 ID 的运行状态检查。
 
 终端通过、页面提示或 `ok: true` 都不能单独作为交付证据。必须回读构建产物，并检查真实使用面。
 

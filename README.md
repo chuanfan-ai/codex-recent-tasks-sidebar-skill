@@ -64,11 +64,12 @@ open "build/本机AI状态栏.app"
 
 ```bash
 ./scripts/qa.sh
+./scripts/launch_synthetic_ui_qa.sh --launch
 ```
 
 验收包含原生构建、Swift 严格并发检查、应用名称与版本检查、临时签名、架构检查、三类 Agent 的固定合成测试库、自检、额度解析与故障恢复、Kimi 总量合并与“总量 / Code 5h / Code 7天”窄栏展示、QwenWorkCN 非消费式待查看读取、首批 Cowork 适配器契约与故障隔离、输入文件只读哈希比对和脱敏扫描。
 
-全部测试数据均由脚本临时生成，不接触真实任务内容。真实启动验收也应遵守相同边界，并且未经用户确认不得覆盖 `/Applications` 中的应用。
+`qa.sh` 还会准备独立的“本机AI状态栏 QA”副本。布局、可访问性树、240 像素宽度、置顶和吸附验收必须通过 `launch_synthetic_ui_qa.sh` 启动该副本，避免桌面验收工具读取真实任务标题。未经用户确认不得覆盖 `/Applications` 中的应用。
 
 ## 仓库结构
 
@@ -82,6 +83,7 @@ open "build/本机AI状态栏.app"
 ├── scripts/
 │   ├── build_app.sh
 │   ├── generate_app_icon.swift
+│   ├── launch_synthetic_ui_qa.sh
 │   └── qa.sh
 ├── tests/
 │   └── AgentAdapterContractTests.swift
