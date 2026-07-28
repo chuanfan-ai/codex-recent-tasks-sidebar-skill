@@ -214,8 +214,8 @@ JSONL
 
 cat > "$FIXTURE_KIMI_USAGE" <<'TEXT'
 Plan usage
-  5-hour   [########------------]  40% used
-  Weekly   [##################--]  90% used
+  Weekly limit  [##################--]  90% used
+  5h limit      [########------------]  40% used
 TEXT
 
 cat > "$FIXTURE_KIMI_TOTAL_USAGE_LOG" <<'TEXT'

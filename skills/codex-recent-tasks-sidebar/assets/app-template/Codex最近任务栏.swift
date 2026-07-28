@@ -5151,12 +5151,12 @@ enum SelfTest {
 
             let kimiUsageFixture = """
             \u{001B}[1mPlan usage\u{001B}[0m
-              5-hour   [########------------]  40% used
-              Weekly  [##################--]  90% used
+              Weekly limit  [##################--]  90% used
+              5h limit      [########------------]  40% used
             """
             guard KimiUsageTextParser.windows(from: kimiUsageFixture) == [
-                UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
                 UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
             ] else {
                 fputs("SELF_TEST_FAILED Kimi usage parsing\n", stderr)
                 return 25
