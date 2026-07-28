@@ -18,6 +18,7 @@ FIXTURE_QWEN_SNAPSHOT="$FIXTURE_DIR/qwen-desktop-snapshot.json"
 FIXTURE_KIMI_INDEX="$FIXTURE_DIR/kimi-session-index.jsonl"
 FIXTURE_KIMI_RUNNING_DIR="$FIXTURE_DIR/kimi-running"
 FIXTURE_KIMI_IDLE_DIR="$FIXTURE_DIR/kimi-idle"
+FIXTURE_KIMI_STALE_DIR="$FIXTURE_DIR/kimi-stale"
 FIXTURE_KIMI_MONITOR_DIR="$FIXTURE_DIR/kimi-monitor"
 FIXTURE_KIMI_USAGE="$FIXTURE_DIR/kimi-usage.txt"
 
@@ -153,18 +154,21 @@ cat > "$FIXTURE_QWEN_SNAPSHOT" <<'JSON'
     "percentage": 27.55,
     "unit": "credits"
   },
-  "pendingChatIDs": ["qwen-chat-review"]
+  "unreadChatIDs": ["qwen-chat-review"],
+  "unreadSubChatIDs": ["qwen-sub-review"]
 }
 JSON
 
 mkdir -p \
   "$FIXTURE_KIMI_RUNNING_DIR/agents/main" \
   "$FIXTURE_KIMI_IDLE_DIR/agents/main" \
+  "$FIXTURE_KIMI_STALE_DIR/agents/main" \
   "$FIXTURE_KIMI_MONITOR_DIR/agents/main"
 
 cat > "$FIXTURE_KIMI_INDEX" <<JSONL
 {"sessionId":"kimi-running","sessionDir":"$FIXTURE_KIMI_RUNNING_DIR","workDir":"/tmp/Kimi中文项目"}
 {"sessionId":"kimi-idle","sessionDir":"$FIXTURE_KIMI_IDLE_DIR","workDir":"/tmp/Kimi历史项目"}
+{"sessionId":"kimi-stale","sessionDir":"$FIXTURE_KIMI_STALE_DIR","workDir":"/tmp/Kimi已退出项目"}
 {"sessionId":"kimi-monitor","sessionDir":"$FIXTURE_KIMI_MONITOR_DIR","workDir":"/tmp/local-ai-statusbar-monitor"}
 JSONL
 
@@ -173,6 +177,9 @@ cat > "$FIXTURE_KIMI_RUNNING_DIR/state.json" <<'JSON'
 JSON
 cat > "$FIXTURE_KIMI_IDLE_DIR/state.json" <<'JSON'
 {"createdAt":"2099-12-31T22:00:00.000Z","updatedAt":"2099-12-31T23:00:00.000Z","title":"Kimi 中文历史线程","isCustomTitle":true,"workDir":"/tmp/Kimi历史项目"}
+JSON
+cat > "$FIXTURE_KIMI_STALE_DIR/state.json" <<'JSON'
+{"createdAt":"2099-12-31T21:30:00.000Z","updatedAt":"2099-12-31T22:30:00.000Z","title":"Kimi 已退出残留线程","isCustomTitle":true,"workDir":"/tmp/Kimi已退出项目"}
 JSON
 cat > "$FIXTURE_KIMI_MONITOR_DIR/state.json" <<'JSON'
 {"createdAt":"2099-12-31T21:00:00.000Z","updatedAt":"2099-12-31T22:00:00.000Z","title":"本机AI状态栏额度监控","isCustomTitle":true,"workDir":"/tmp/local-ai-statusbar-monitor"}
@@ -184,6 +191,9 @@ JSONL
 cat > "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl" <<'JSONL'
 {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-idle-step"}}
 {"type":"context.append_loop_event","event":{"type":"step.end","uuid":"synthetic-idle-step"}}
+JSONL
+cat > "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl" <<'JSONL'
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-stale-step"}}
 JSONL
 cat > "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl" <<'JSONL'
 {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-monitor-step"}}
@@ -237,6 +247,7 @@ before_qwen_hash="$(/usr/bin/shasum "$FIXTURE_QWEN_DB")"
 before_kimi_index_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_INDEX")"
 before_kimi_running_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_RUNNING_DIR/agents/main/wire.jsonl")"
 before_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl")"
+before_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 before_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
 self_test_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
@@ -249,9 +260,11 @@ self_test_output="$(
   CODEX_SELF_TEST_EXPECT_RUNNING_ID="00000000-0000-0000-0000-000000000002" \
   CODEX_SELF_TEST_EXPECT_ACTION_ID="00000000-0000-0000-0000-000000000001" \
   QWEN_TASK_DB_OVERRIDE="$FIXTURE_QWEN_DB" \
-  QWEN_PENDING_CHAT_IDS_OVERRIDE="qwen-chat-review" \
+  QWEN_UNREAD_CHAT_IDS_OVERRIDE="qwen-chat-review" \
+  QWEN_UNREAD_SUBCHAT_IDS_OVERRIDE="qwen-sub-review" \
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
+  KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
@@ -263,6 +276,7 @@ after_qwen_hash="$(/usr/bin/shasum "$FIXTURE_QWEN_DB")"
 after_kimi_index_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_INDEX")"
 after_kimi_running_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_RUNNING_DIR/agents/main/wire.jsonl")"
 after_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl")"
+after_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 after_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
 
 [[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
@@ -292,7 +306,7 @@ qwen_bridge_output="$(
   QWEN_DESKTOP_SNAPSHOT_OVERRIDE="$FIXTURE_QWEN_SNAPSHOT" \
   "$BINARY" --qwen-bridge-self-test
 )"
-[[ "$qwen_bridge_output" == "QWEN_BRIDGE_SELF_TEST_OK pending=1 quota=ok" ]] || {
+[[ "$qwen_bridge_output" == "QWEN_BRIDGE_SELF_TEST_OK unread_chat=1 unread_subchat=1 quota=ok" ]] || {
   print -u2 "QwenWorkCN 本机额度桥自检失败：$qwen_bridge_output"
   exit 17
 }
@@ -315,6 +329,7 @@ activity_probe_output="$(
   QWEN_DESKTOP_SNAPSHOT_OVERRIDE="$FIXTURE_QWEN_SNAPSHOT" \
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
+  KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
   "$BINARY" --activity-probe
 )"
 [[ "$activity_probe_output" == "ACTIVITY_PROBE_OK codex=2 qwen=2 kimi=1" ]] || {
@@ -360,6 +375,7 @@ set -e
 [[ "$before_kimi_index_hash" == "$after_kimi_index_hash" \
    && "$before_kimi_running_hash" == "$after_kimi_running_hash" \
    && "$before_kimi_idle_hash" == "$after_kimi_idle_hash" \
+   && "$before_kimi_stale_hash" == "$after_kimi_stale_hash" \
    && "$before_kimi_monitor_hash" == "$after_kimi_monitor_hash" ]] || {
   print -u2 "自检修改了固定 Kimi 测试会话"
   exit 16
@@ -370,9 +386,11 @@ fallback_output="$(
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_DIR/missing-session-index.jsonl" \
   CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_DIR/missing-global-state.json" \
   QWEN_TASK_DB_OVERRIDE="$FIXTURE_QWEN_DB" \
-  QWEN_PENDING_CHAT_IDS_OVERRIDE="qwen-chat-review" \
+  QWEN_UNREAD_CHAT_IDS_OVERRIDE="qwen-chat-review" \
+  QWEN_UNREAD_SUBCHAT_IDS_OVERRIDE="qwen-sub-review" \
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
+  KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
   "$BINARY" --self-test
 )"
 [[ "$fallback_output" == *"SELF_TEST_OK count=3"* ]] || {
