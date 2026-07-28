@@ -65,6 +65,204 @@ enum TaskDisplayState: Equatable {
     }
 }
 
+enum ActivityTaskPolicy {
+    static func includes(_ displayState: TaskDisplayState) -> Bool {
+        displayState != .idle
+    }
+}
+
+enum AppLayout {
+    static let panelWidth: CGFloat = 240
+    static let minimumPanelHeight: CGFloat = 360
+    static let idealPanelHeight: CGFloat = 720
+    static let defaultWindowMode: WindowDisplayMode = .pinned
+    static let alwaysOnTop = true
+}
+
+struct AgentQuotaDisplay: Identifiable, Equatable, Sendable {
+    let label: String
+    let remainingPercent: Int
+    let remainingValueText: String?
+
+    var id: String { label }
+}
+
+enum QwenUsageSnapshotParser {
+    static func quota(from result: [String: Any]) throws -> AgentQuotaDisplay {
+        let payload = (result["json"] as? [String: Any]) ?? result
+        guard let quota = payload["userQuota"] as? [String: Any],
+              let total = number(quota["total"]),
+              let remaining = number(quota["remaining"]),
+              total > 0 else {
+            throw CodexUsageError.protocolFailed("QwenWorkCN 用量缺少 userQuota")
+        }
+
+        let remainingPercent = Int(
+            min(max(remaining / total * 100, 0), 100).rounded()
+        )
+        return AgentQuotaDisplay(
+            label: "积分",
+            remainingPercent: remainingPercent,
+            remainingValueText: decimalText(remaining)
+        )
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+        if let text = value as? String {
+            return Double(text)
+        }
+        return nil
+    }
+
+    private static func decimalText(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+}
+
+enum QwenTaskStatusParser {
+    static func runtimeState(taskStatus: String?, streamID: String?) -> TaskRuntimeState {
+        let normalized = taskStatus?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if [
+            "waiting_for_user",
+            "waiting_for_input",
+            "waiting_on_user",
+            "waiting_on_approval",
+            "needs_action",
+            "pending_approval",
+        ].contains(normalized) {
+            return .needsAction
+        }
+        if [
+            "completed",
+            "complete",
+            "cancelled",
+            "canceled",
+            "failed",
+            "error",
+            "idle",
+            "stopped",
+        ].contains(normalized) {
+            return .idle
+        }
+        if [
+            "running",
+            "active",
+            "streaming",
+            "pending",
+            "queued",
+            "in_progress",
+        ].contains(normalized) {
+            return .running
+        }
+        if let streamID,
+           !streamID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .running
+        }
+        return .unknown
+    }
+}
+
+enum KimiUsageTextParser {
+    private static let ansiPattern =
+        #"\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B\[[0-?]*[ -/]*[@-~]"#
+    private static let rowPattern =
+        #"(?im)^\s*([^\r\n\[]+?)\s+(?:\[[^\r\n\]]*\]\s+)?(\d{1,3})%\s+used\b"#
+
+    static func windows(from rawText: String) -> [UsageWindowDisplay] {
+        let cleaned = replacingMatches(
+            pattern: ansiPattern,
+            in: rawText,
+            template: ""
+        )
+        guard let expression = try? NSRegularExpression(pattern: rowPattern) else {
+            return []
+        }
+        let range = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+        var seenLabels = Set<String>()
+        var windows: [UsageWindowDisplay] = []
+        for match in expression.matches(in: cleaned, range: range) {
+            guard let labelRange = Range(match.range(at: 1), in: cleaned),
+                  let usedRange = Range(match.range(at: 2), in: cleaned),
+                  let usedPercent = Int(cleaned[usedRange]) else {
+                continue
+            }
+            let label = localizedLabel(String(cleaned[labelRange]))
+            guard !label.isEmpty, seenLabels.insert(label).inserted else { continue }
+            windows.append(
+                UsageWindowDisplay(
+                    label: label,
+                    remainingPercent: 100 - min(max(usedPercent, 0), 100)
+                )
+            )
+        }
+        return windows
+    }
+
+    private static func localizedLabel(_ rawLabel: String) -> String {
+        let label = rawLabel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let lowercased = label.lowercased()
+        if lowercased.contains("5-hour") || lowercased.contains("5 hour") {
+            return "5 小时"
+        }
+        if lowercased.contains("weekly") || lowercased == "week" {
+            return "每周"
+        }
+        if lowercased.contains("monthly") || lowercased == "month" {
+            return "每月"
+        }
+        return label
+    }
+
+    private static func replacingMatches(
+        pattern: String,
+        in input: String,
+        template: String
+    ) -> String {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return input
+        }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        return expression.stringByReplacingMatches(
+            in: input,
+            range: range,
+            withTemplate: template
+        )
+    }
+}
+
+enum KimiWireStateParser {
+    static func runtimeState(from data: Data) -> TaskRuntimeState {
+        var activeStepCount = 0
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard line.count <= 4 * 1024 * 1024,
+                  let record = try? JSONSerialization.jsonObject(with: Data(line))
+                    as? [String: Any],
+                  record["type"] as? String == "context.append_loop_event",
+                  let event = record["event"] as? [String: Any],
+                  let eventType = event["type"] as? String else {
+                continue
+            }
+            if eventType == "step.begin" {
+                activeStepCount += 1
+            } else if eventType == "step.end" {
+                activeStepCount = max(0, activeStepCount - 1)
+            }
+        }
+        return activeStepCount > 0 ? .running : .idle
+    }
+}
+
 struct CodexTask: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let title: String
@@ -978,9 +1176,9 @@ enum DockPlacement {
             }
         }
 
-        let alignedTopY = codexFrame.maxY - panelSize.height
+        let alignedBottomY = codexFrame.minY
         let targetY = min(
-            max(visibleFrame.minY, alignedTopY),
+            max(visibleFrame.minY, alignedBottomY),
             visibleFrame.maxY - panelSize.height
         )
         return NSPoint(x: targetX, y: targetY)
@@ -989,7 +1187,7 @@ enum DockPlacement {
 
 @MainActor
 final class WindowModeModel: ObservableObject {
-    @Published private(set) var mode: WindowDisplayMode = .docked
+    @Published private(set) var mode: WindowDisplayMode = AppLayout.defaultWindowMode
     @Published private(set) var dockSide: DockSide
     @Published fileprivate(set) var statusText = "正在查找 Codex 窗口"
 

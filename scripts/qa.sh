@@ -153,7 +153,7 @@ after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 after_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
 after_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
