@@ -477,6 +477,144 @@ struct SyntheticAgentProductApplicationCatalog: ApplicationCatalog {
     }
 }
 
+enum KimiWorkActivityState: Equatable, Sendable {
+    case running
+    case needsAction
+    case needsReview
+}
+
+struct KimiWorkActivityRecord: Equatable, Sendable {
+    let conversationKey: String
+    let title: String?
+    let state: KimiWorkActivityState
+}
+
+enum KimiWorkStatusParser {
+    private static let maximumStatusBytes = 512 * 1_024
+    private static let maximumTitleBytes = 1_024 * 1_024
+    private static let maximumSourceRecords = 500
+    private static let maximumActiveRecords = 64
+
+    static func activeRecords(
+        statusData: Data?,
+        unreadData: Data?,
+        titleData: Data?
+    ) -> [KimiWorkActivityRecord]? {
+        let statuses = stringDictionary(
+            from: statusData,
+            maximumBytes: maximumStatusBytes
+        )
+        let unreadKeys = stringArray(
+            from: unreadData,
+            maximumBytes: maximumStatusBytes
+        )
+        guard statuses != nil || unreadKeys != nil else {
+            return nil
+        }
+
+        let titles = stringDictionary(
+            from: titleData,
+            maximumBytes: maximumTitleBytes
+        ) ?? [:]
+        let unreadSet = Set((unreadKeys ?? []).filter(validKey))
+        let candidateKeys = Set((statuses ?? [:]).keys.filter(validKey))
+            .union(unreadSet)
+
+        let records = candidateKeys.compactMap {
+            key -> KimiWorkActivityRecord? in
+            let state: KimiWorkActivityState
+            switch statuses?[key] {
+            case "running":
+                state = .running
+            case "blocked":
+                state = .needsAction
+            case "completed" where unreadSet.contains(key):
+                state = .needsReview
+            case nil where unreadSet.contains(key):
+                state = .needsReview
+            default:
+                return nil
+            }
+            return KimiWorkActivityRecord(
+                conversationKey: key,
+                title: normalizedTitle(titles[key]),
+                state: state
+            )
+        }
+        return records.sorted {
+            let leftPriority = priority($0.state)
+            let rightPriority = priority($1.state)
+            if leftPriority != rightPriority {
+                return leftPriority < rightPriority
+            }
+            return $0.conversationKey < $1.conversationKey
+        }.prefix(maximumActiveRecords).map { $0 }
+    }
+
+    private static func stringDictionary(
+        from data: Data?,
+        maximumBytes: Int
+    ) -> [String: String]? {
+        guard let data else { return nil }
+        guard data.count <= maximumBytes,
+              let values = try? JSONDecoder().decode(
+                  [String: String].self,
+                  from: data
+              ) else {
+            return nil
+        }
+        var limitedValues: [String: String] = [:]
+        for (key, value) in values.prefix(maximumSourceRecords) {
+            limitedValues[key] = value
+        }
+        return limitedValues
+    }
+
+    private static func stringArray(
+        from data: Data?,
+        maximumBytes: Int
+    ) -> [String]? {
+        guard let data else { return nil }
+        guard data.count <= maximumBytes,
+              let values = try? JSONDecoder().decode(
+                  [String].self,
+                  from: data
+              ) else {
+            return nil
+        }
+        return Array(values.prefix(maximumSourceRecords))
+    }
+
+    private static func validKey(_ value: String) -> Bool {
+        !value.isEmpty
+            && value.utf8.count <= 512
+            && value.unicodeScalars.allSatisfy {
+                !CharacterSet.controlCharacters.contains($0)
+            }
+    }
+
+    private static func normalizedTitle(_ rawValue: String?) -> String? {
+        guard let rawValue, rawValue.utf8.count <= 2_048 else {
+            return nil
+        }
+        let title = rawValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return title.isEmpty ? nil : String(title.prefix(160))
+    }
+
+    private static func priority(_ state: KimiWorkActivityState) -> Int {
+        switch state {
+        case .needsAction:
+            return 0
+        case .running:
+            return 1
+        case .needsReview:
+            return 2
+        }
+    }
+}
+
 enum WorkBuddySidecarResponseParser {
     static func sessionListURLs(from data: Data) -> [URL] {
         guard data.count <= 256 * 1024,
