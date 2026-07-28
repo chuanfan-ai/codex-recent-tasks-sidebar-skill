@@ -6,6 +6,8 @@ BUILD_DIR="$ROOT/build"
 APP_DIR="$BUILD_DIR/本机AI状态栏.app"
 BINARY="$APP_DIR/Contents/MacOS/本机AI状态栏"
 SOURCE="$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift"
+ADAPTER_SOURCE="$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/AgentAdapter.swift"
+ADAPTER_CONTRACT_TEST="$ROOT/tests/AgentAdapterContractTests.swift"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
@@ -56,6 +58,20 @@ done
 
 rm -rf "$FIXTURE_DIR"
 mkdir -p "$FIXTURE_DIR"
+/usr/bin/swiftc \
+  -parse-as-library \
+  -target "$(/usr/bin/uname -m)-apple-macos13.0" \
+  -module-cache-path "$BUILD_DIR/.module-cache" \
+  -warn-concurrency \
+  -warnings-as-errors \
+  "$ADAPTER_SOURCE" \
+  "$ADAPTER_CONTRACT_TEST" \
+  -o "$FIXTURE_DIR/agent-adapter-contract-tests"
+adapter_contract_output="$("$FIXTURE_DIR/agent-adapter-contract-tests")"
+[[ "$adapter_contract_output" == "AGENT_ADAPTER_CONTRACT_OK products=2 metadata_only=ok trae_ide_excluded=ok isolation=ok" ]] || {
+  print -u2 "Agent 适配器契约自检失败：$adapter_contract_output"
+  exit 23
+}
 /usr/bin/sqlite3 "$FIXTURE_DB" <<'SQL'
 CREATE TABLE threads (
   id TEXT PRIMARY KEY,
