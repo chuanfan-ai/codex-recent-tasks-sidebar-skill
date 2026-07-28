@@ -39,8 +39,18 @@ product_section="$(
   || fail "product name does not match agent heading typography"
 [[ "$product_section" == *'Text(presentation.statusText)'* ]] \
   || fail "missing verified product status"
+[[ "$product_section" == *'NSWorkspace.shared.icon(forFile:'* ]] \
+  || fail "official installed application icon is not rendered"
+[[ "$product_section" == *'Image(nsImage:'* ]] \
+  || fail "product icon is still a generic symbol"
+[[ "$product_section" == *'snapshot.quotaSummary ?? "余额 —"'* ]] \
+  || fail "missing product balance slot"
+[[ "$product_section" == *'ForEach(snapshot.threads)'* ]] \
+  || fail "missing product thread list"
+[[ "$product_section" == *'Text("\(snapshot.activeTaskCount ?? 0)")'* ]] \
+  || fail "missing active thread count"
 
 /usr/bin/grep -Fq 'ForEach(discoveryStore.snapshots)' "$SOURCE" \
   || fail "products are not rendered as peers"
 
-print "PRODUCT_PEER_PRESENTATION_OK products=peer visible_copy=minimal"
+print "PRODUCT_PEER_PRESENTATION_OK products=peer icons=official threads=present quota_slot=present visible_copy=minimal"

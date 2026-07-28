@@ -14,6 +14,16 @@ private struct SyntheticApplicationCatalog: ApplicationCatalog {
     }
 }
 
+private struct SyntheticProductDataSource: AgentProductDataSource {
+    let snapshot: AgentProductDataSnapshot
+
+    func load(
+        for application: InstalledApplicationMetadata
+    ) async throws -> AgentProductDataSnapshot {
+        snapshot
+    }
+}
+
 private struct ThrowingAdapter: LocalAgentAdapter {
     let descriptor = AgentProductDescriptor(
         id: "synthetic-failure",
@@ -26,16 +36,50 @@ private struct ThrowingAdapter: LocalAgentAdapter {
         privacyDescription: "不读取用户内容"
     )
 
-    func inspect(using catalog: any ApplicationCatalog) throws -> AgentProductSnapshot {
+    func inspect(
+        using catalog: any ApplicationCatalog
+    ) async throws -> AgentProductSnapshot {
         throw AgentAdapterError.inspectionFailed("synthetic")
     }
 }
 
 @main
 private struct AgentAdapterContractTests {
-    static func main() {
-        let workBuddy = WorkBuddyAdapter()
-        let traeWork = TraeWorkAdapter()
+    static func main() async {
+        let workBuddyThreads = [
+            AgentProductThread(
+                id: "workbuddy-session-current",
+                title: "WorkBuddy 当前任务",
+                updatedMillis: 4_102_444_800_000,
+                state: .running
+            ),
+            AgentProductThread(
+                id: "workbuddy-session-recent",
+                title: "WorkBuddy 最近任务",
+                updatedMillis: 4_102_444_700_000,
+                state: .recent
+            ),
+        ]
+        let workBuddy = WorkBuddyAdapter(
+            dataSource: SyntheticProductDataSource(
+                snapshot: AgentProductDataSnapshot(
+                    threads: workBuddyThreads,
+                    quotaSummary: nil,
+                    availability: .available
+                )
+            )
+        )
+        let traeWork = TraeWorkAdapter(
+            dataSource: SyntheticProductDataSource(
+                snapshot: AgentProductDataSnapshot(
+                    threads: [],
+                    quotaSummary: nil,
+                    availability: .unavailable(
+                        "上游未开放可独立验证的线程与余额接口"
+                    )
+                )
+            )
+        )
 
         guard workBuddy.descriptor.id == "workbuddy",
               workBuddy.descriptor.displayName == "WorkBuddy",
@@ -45,8 +89,11 @@ private struct AgentAdapterContractTests {
               workBuddy.descriptor.bundleIdentifiers == [
                   "com.workbuddy.workbuddy",
               ],
-              workBuddy.descriptor.supportLevel == .discovered,
-              workBuddy.descriptor.capabilities == .discoveryOnly else {
+              workBuddy.descriptor.supportLevel == .partial,
+              workBuddy.descriptor.capabilities.monitorsTasks,
+              !workBuddy.descriptor.capabilities.monitorsQuota,
+              !workBuddy.descriptor.capabilities.opensExactTask,
+              workBuddy.descriptor.capabilities.opensApplication else {
             fail("WorkBuddy descriptor")
         }
 
@@ -87,24 +134,38 @@ private struct AgentAdapterContractTests {
             ]
         )
 
-        let workBuddySnapshot = inspect(workBuddy, catalog: installedCatalog)
-        let traeWorkSnapshot = inspect(traeWork, catalog: installedCatalog)
+        let workBuddySnapshot = await inspect(
+            workBuddy,
+            catalog: installedCatalog
+        )
+        let traeWorkSnapshot = await inspect(
+            traeWork,
+            catalog: installedCatalog
+        )
         guard workBuddySnapshot.isInstalled,
               workBuddySnapshot.isRunning,
               workBuddySnapshot.application?.version == "5.3.5",
+              workBuddySnapshot.iconApplicationPath
+                  == "/Applications/WorkBuddy.app",
               traeWorkSnapshot.isInstalled,
               traeWorkSnapshot.isRunning,
               traeWorkSnapshot.application?.displayName == "TRAE SOLO",
-              workBuddySnapshot.activeTaskCount == nil,
+              traeWorkSnapshot.iconApplicationPath
+                  == "/Applications/TRAE SOLO.app",
+              workBuddySnapshot.activeTaskCount == 1,
+              workBuddySnapshot.threads == workBuddyThreads,
               workBuddySnapshot.quotaSummary == nil,
               traeWorkSnapshot.activeTaskCount == nil,
-              traeWorkSnapshot.quotaSummary == nil else {
-            fail("metadata-only discovery")
+              traeWorkSnapshot.quotaSummary == nil,
+              traeWorkSnapshot.dataAvailability == .unavailable(
+                  "上游未开放可独立验证的线程与余额接口"
+              ) else {
+            fail("verified product data")
         }
         guard workBuddySnapshot.presentation == AgentProductPresentation(
             statusText: "运行中",
-            supportText: "已发现 · 待适配",
-            detailText: "仅识别应用元数据；任务与额度不读取",
+            supportText: "部分支持",
+            detailText: "已读取 2 个公开会话摘要；余额接口未开放",
             canOpenApplication: true
         ),
         traeWorkSnapshot.presentation.statusText == "运行中",
@@ -123,7 +184,7 @@ private struct AgentAdapterContractTests {
             ],
             runningBundleIdentifiers: ["com.trae.app"]
         )
-        let traeIDEOnlySnapshot = inspect(
+        let traeIDEOnlySnapshot = await inspect(
             traeWork,
             catalog: traeIDEOnlyCatalog
         )
@@ -140,7 +201,7 @@ private struct AgentAdapterContractTests {
         let registry = AgentAdapterRegistry(
             adapters: [ThrowingAdapter(), workBuddy, traeWork]
         )
-        let snapshots = registry.snapshots(using: installedCatalog)
+        let snapshots = await registry.snapshots(using: installedCatalog)
         guard snapshots.count == 3,
               snapshots[0].health == .inspectionFailed,
               snapshots[0].activeTaskCount == nil,
@@ -157,18 +218,104 @@ private struct AgentAdapterContractTests {
             fail("first-batch order")
         }
 
+        let sidecarPayload = Data(
+            """
+            {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "result": [
+                {
+                  "acpEndpoint": "http://127.0.0.1:55174/api/v1/acp"
+                },
+                {
+                  "acpEndpoint": "https://outside.example/api/v1/acp"
+                },
+                {
+                  "acpEndpoint": "http://127.0.0.1:55175/internal/acp"
+                }
+              ]
+            }
+            """.utf8
+        )
+        guard WorkBuddySidecarResponseParser.sessionListURLs(
+            from: sidecarPayload
+        ) == [
+            URL(
+                string:
+                    "http://127.0.0.1:55174/api/v1/sessions?cwd=*"
+            )!,
+        ] else {
+            fail("WorkBuddy loopback endpoint validation")
+        }
+
+        let nowMillis: Int64 = 4_102_444_800_000
+        let sessionPayload = Data(
+            """
+            {
+              "data": {
+                "sessions": [
+                  {
+                    "id": "current",
+                    "name": "  当前任务  ",
+                    "updatedAt": 4102444800000,
+                    "isCurrent": true
+                  },
+                  {
+                    "id": "recent",
+                    "name": "最近任务",
+                    "updatedAt": 4102444700000,
+                    "isCurrent": false
+                  },
+                  {
+                    "id": "old",
+                    "name": "过期任务",
+                    "updatedAt": 4102200000000,
+                    "isCurrent": false
+                  },
+                  {
+                    "id": "blank",
+                    "name": "   ",
+                    "updatedAt": 4102444800000,
+                    "isCurrent": true
+                  }
+                ]
+              }
+            }
+            """.utf8
+        )
+        guard WorkBuddySessionListParser.threads(
+            from: sessionPayload,
+            nowMillis: nowMillis
+        ) == [
+            AgentProductThread(
+                id: "current",
+                title: "当前任务",
+                updatedMillis: 4_102_444_800_000,
+                state: .running
+            ),
+            AgentProductThread(
+                id: "recent",
+                title: "最近任务",
+                updatedMillis: 4_102_444_700_000,
+                state: .recent
+            ),
+        ] else {
+            fail("WorkBuddy public session parsing")
+        }
+
         print(
-            "AGENT_ADAPTER_CONTRACT_OK products=2 metadata_only=ok "
-                + "trae_ide_excluded=ok isolation=ok presentation=ok"
+            "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok "
+                + "workbuddy_public_sessions=ok trae_ide_excluded=ok "
+                + "isolation=ok presentation=ok"
         )
     }
 
     private static func inspect(
         _ adapter: some LocalAgentAdapter,
         catalog: any ApplicationCatalog
-    ) -> AgentProductSnapshot {
+    ) async -> AgentProductSnapshot {
         do {
-            return try adapter.inspect(using: catalog)
+            return try await adapter.inspect(using: catalog)
         } catch {
             fail("unexpected inspection failure")
         }
