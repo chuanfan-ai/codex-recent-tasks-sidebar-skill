@@ -114,11 +114,22 @@ enum CompactQuotaLineFormatter {
     ) -> [CompactQuotaLine] {
         windows.map {
             CompactQuotaLine(
-                label: $0.label,
+                label: expandedLabel($0.label),
                 value: isStale
-                    ? "剩余 \($0.remainingPercent)% · 延迟"
-                    : "剩余 \($0.remainingPercent)%"
+                    ? "余 \($0.remainingPercent)% · 延迟"
+                    : "余 \($0.remainingPercent)%"
             )
+        }
+    }
+
+    private static func expandedLabel(_ label: String) -> String {
+        switch label {
+        case "5 小时":
+            return "5h"
+        case "每周":
+            return "7天"
+        default:
+            return label
         }
     }
 
@@ -261,7 +272,10 @@ enum KimiUsageTextParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         let lowercased = label.lowercased()
-        if lowercased.contains("5-hour") || lowercased.contains("5 hour") {
+        if lowercased.range(
+            of: #"(^|[^0-9])5[\s-]*h(?:our)?s?\b"#,
+            options: .regularExpression
+        ) != nil {
             return "5 小时"
         }
         if lowercased.contains("weekly") || lowercased == "week" {
@@ -286,6 +300,82 @@ enum KimiUsageTextParser {
             in: input,
             range: range,
             withTemplate: template
+        )
+    }
+}
+
+enum KimiTotalUsageLogParser {
+    private static let ratioPattern =
+        #"\bomniRatio=([0-9]+(?:\.[0-9]+)?)\b"#
+    private static let maximumLineSize = 4 * 1024
+
+    static func window(from data: Data) -> UsageWindowDisplay? {
+        let text = String(decoding: data, as: UTF8.self)
+        guard let latestRefreshLine = text.split(
+            separator: "\n",
+            omittingEmptySubsequences: true
+        ).reversed().first(where: { $0.contains("refreshed(sub):") }),
+        latestRefreshLine.utf8.count <= maximumLineSize else {
+            return nil
+        }
+
+        let line = String(latestRefreshLine)
+        guard let expression = try? NSRegularExpression(pattern: ratioPattern),
+              let match = expression.firstMatch(
+                  in: line,
+                  range: NSRange(line.startIndex..<line.endIndex, in: line)
+              ),
+              let ratioRange = Range(match.range(at: 1), in: line),
+              let rawRatio = Double(line[ratioRange]),
+              rawRatio.isFinite,
+              rawRatio >= 0,
+              rawRatio <= 100 else {
+            return nil
+        }
+        let usedRatio = rawRatio > 1 ? rawRatio / 100 : rawRatio
+        let remainingPercent = Int(
+            ((1 - min(max(usedRatio, 0), 1)) * 100).rounded()
+        )
+        return UsageWindowDisplay(
+            label: "总量",
+            remainingPercent: remainingPercent
+        )
+    }
+}
+
+enum KimiTotalUsageLogReader {
+    private static let maximumTailSize = 4 * 1024 * 1024
+
+    static func currentWindow() -> UsageWindowDisplay? {
+        let environment = ProcessInfo.processInfo.environment
+        let url: URL
+        if let override = environment["KIMI_TOTAL_USAGE_LOG_OVERRIDE"],
+           !override.isEmpty {
+            url = URL(fileURLWithPath: override)
+        } else {
+            url = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/kimi-desktop/main.log")
+        }
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        let fileSizeNumber = attributes[.size] as? NSNumber,
+        fileSizeNumber.int64Value > 0,
+        let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let fileSize = UInt64(fileSizeNumber.int64Value)
+        let readSize = min(fileSize, UInt64(maximumTailSize))
+        do {
+            try handle.seek(toOffset: fileSize - readSize)
+        } catch {
+            return nil
+        }
+        return KimiTotalUsageLogParser.window(
+            from: handle.readData(ofLength: Int(readSize))
         )
     }
 }
@@ -1031,7 +1121,7 @@ final class KimiUsageClient: @unchecked Sendable {
             guard let text = String(data: data, encoding: .utf8) else {
                 throw KimiUsageError.invalidResponse
             }
-            return try parsedWindows(from: text)
+            return try mergedWindows(from: text)
         }
 
         let executableURL = try executableURL()
@@ -1084,15 +1174,36 @@ final class KimiUsageClient: @unchecked Sendable {
               let text = String(data: output, encoding: .utf8) else {
             throw KimiUsageError.invalidResponse
         }
-        return try parsedWindows(from: text)
+        return try mergedWindows(from: text)
     }
 
-    private static func parsedWindows(from text: String) throws -> [UsageWindowDisplay] {
-        let windows = KimiUsageTextParser.windows(from: text)
-        guard !windows.isEmpty else {
+    private static func mergedWindows(from text: String) throws -> [UsageWindowDisplay] {
+        let codeWindows = KimiUsageTextParser.windows(from: text).sorted {
+            let leftPriority = windowPriority($0.label)
+            let rightPriority = windowPriority($1.label)
+            if leftPriority == rightPriority {
+                return $0.label < $1.label
+            }
+            return leftPriority < rightPriority
+        }
+        guard !codeWindows.isEmpty else {
             throw KimiUsageError.invalidResponse
         }
-        return windows
+        guard let totalWindow = KimiTotalUsageLogReader.currentWindow() else {
+            return codeWindows
+        }
+        return [totalWindow] + codeWindows
+    }
+
+    private static func windowPriority(_ label: String) -> Int {
+        switch label {
+        case "5 小时":
+            return 0
+        case "每周":
+            return 1
+        default:
+            return 2
+        }
     }
 
     private static func runUsage(
