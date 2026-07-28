@@ -8,6 +8,7 @@ BINARY="$APP_DIR/Contents/MacOS/本机AI状态栏"
 SOURCE="$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift"
 ADAPTER_SOURCE="$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/AgentAdapter.swift"
 ADAPTER_CONTRACT_TEST="$ROOT/tests/AgentAdapterContractTests.swift"
+PRODUCT_PRESENTATION_CONTRACT_TEST="$ROOT/tests/ProductPeerPresentationContractTests.sh"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
@@ -37,6 +38,7 @@ for unread_store in "agents:unseenChanges" "agents:subChatUnseenChanges"; do
   }
 done
 
+"$PRODUCT_PRESENTATION_CONTRACT_TEST"
 "$ROOT/scripts/build_app.sh"
 /usr/bin/swiftc \
   -parse-as-library \
