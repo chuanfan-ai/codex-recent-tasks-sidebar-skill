@@ -2631,8 +2631,94 @@ enum SelfTest {
                 return 16
             }
 
+            guard ActivityTaskPolicy.includes(.running),
+                  ActivityTaskPolicy.includes(.needsAction),
+                  ActivityTaskPolicy.includes(.needsReview),
+                  !ActivityTaskPolicy.includes(.idle) else {
+                fputs("SELF_TEST_FAILED active task policy\n", stderr)
+                return 23
+            }
+
+            let qwenQuota = try QwenUsageSnapshotParser.quota(from: [
+                "json": [
+                    "userQuota": [
+                        "total": 1_000.0,
+                        "used": 275.5,
+                        "remaining": 724.5,
+                        "percentage": 27.55,
+                        "unit": "credits",
+                    ],
+                ],
+            ])
+            guard qwenQuota == AgentQuotaDisplay(
+                label: "积分",
+                remainingPercent: 72,
+                remainingValueText: "724.5"
+            ) else {
+                fputs("SELF_TEST_FAILED Qwen quota parsing\n", stderr)
+                return 24
+            }
+
+            let kimiUsageFixture = """
+            \u{001B}[1mPlan usage\u{001B}[0m
+              5-hour   [########------------]  40% used
+              Weekly  [##################--]  90% used
+            """
+            guard KimiUsageTextParser.windows(from: kimiUsageFixture) == [
+                UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
+                UsageWindowDisplay(label: "每周", remainingPercent: 10),
+            ] else {
+                fputs("SELF_TEST_FAILED Kimi usage parsing\n", stderr)
+                return 25
+            }
+
+            let qwenRunning = QwenTaskStatusParser.runtimeState(
+                taskStatus: "running",
+                streamID: nil
+            )
+            let qwenWaiting = QwenTaskStatusParser.runtimeState(
+                taskStatus: "waiting_for_user",
+                streamID: nil
+            )
+            let qwenCompleted = QwenTaskStatusParser.runtimeState(
+                taskStatus: "completed",
+                streamID: nil
+            )
+            guard qwenRunning == .running,
+                  qwenWaiting == .needsAction,
+                  qwenCompleted == .idle else {
+                fputs("SELF_TEST_FAILED Qwen task state parsing\n", stderr)
+                return 26
+            }
+
+            let kimiRunningFixture = Data("""
+            {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-1"}}
+            """.utf8)
+            let kimiCompletedFixture = Data("""
+            {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"step-1"}}
+            {"type":"context.append_loop_event","event":{"type":"step.end","uuid":"step-1"}}
+            """.utf8)
+            guard KimiWireStateParser.runtimeState(from: kimiRunningFixture) == .running,
+                  KimiWireStateParser.runtimeState(from: kimiCompletedFixture) == .idle else {
+                fputs("SELF_TEST_FAILED Kimi task state parsing\n", stderr)
+                return 27
+            }
+
+            guard AppLayout.panelWidth == 240,
+                  AppLayout.defaultWindowMode == .pinned,
+                  AppLayout.alwaysOnTop else {
+                fputs("SELF_TEST_FAILED compact always-on-top layout\n", stderr)
+                return 28
+            }
+
+            guard leftOrigin.y == codexFrame.minY,
+                  rightOrigin.y == codexFrame.minY else {
+                fputs("SELF_TEST_FAILED bottom-aligned docking\n", stderr)
+                return 29
+            }
+
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
