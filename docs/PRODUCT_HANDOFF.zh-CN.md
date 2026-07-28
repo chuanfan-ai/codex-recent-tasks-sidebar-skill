@@ -1,7 +1,7 @@
 # 本机AI状态栏：产品交接与推进基线
 
 更新日期：2026-07-28  
-当前版本：2.0.0（Build 7）  
+当前版本：2.1.0（Build 8）
 当前开发分支：`feat/local-ai-statusbar`
 
 ## 1. 产品入口
@@ -9,6 +9,8 @@
 - 源码仓库：[chuanfan-ai/codex-recent-tasks-sidebar-skill](https://github.com/chuanfan-ai/codex-recent-tasks-sidebar-skill)
 - 本机构建产物：`build/本机AI状态栏.app`
 - 核心源码：`skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift`
+- 适配器契约：`skills/codex-recent-tasks-sidebar/assets/app-template/AgentAdapter.swift`
+- 首批外部灰测计划：`docs/FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md`
 - 构建入口：`scripts/build_app.sh`
 - 完整验收入口：`scripts/qa.sh`
 - 产品 Skill：`skills/codex-recent-tasks-sidebar/SKILL.md`
@@ -25,7 +27,7 @@
 
 “本机AI状态栏”是一款常驻桌面的原生 macOS 小工具，让用户在不频繁切换窗口的情况下，持续看到本机 AI Agent 的活动线程、待查看状态和剩余额度。
 
-当前服务对象是同时使用 Codex、QwenWorkCN 和 Kimi 的个人用户。下一阶段的产品方向，是把固定三款产品扩展为可发现、可解释、可开关的本机 Agent 监控平台。
+已稳定使用的主体能力服务于同时使用 Codex、QwenWorkCN 和 Kimi 的个人用户。2.1.0 开始把固定三款产品扩展为可发现、可解释的本机 Agent 监控平台，首批 Cowork 产品为 WorkBuddy 与 TRAE Work。
 
 产品不做任务管理，不替用户执行、终止或归档任务，也不读取任务正文。它只提供状态观察和安全跳转。
 
@@ -45,6 +47,27 @@
 - “活动线程”统一包括：运行中、待操作、待查看。
 - 已完成且没有待查看更新的历史线程不显示。
 - 按真实项目分组，显示各产品保存的中文项目名和中文线程名。
+- 新增统一 `LocalAgentAdapter` 契约，定义产品描述、支持等级、能力、应用元数据、健康状态与故障隔离。
+- 新增“首批 Cowork”分区，准确识别 WorkBuddy 与 TRAE Work 的安装和运行状态。
+- WorkBuddy 与 TRAE Work 均为“已发现 · 待适配”：任务数和额度在数据模型中保持空值，不用进程数、旧缓存或猜测填充。
+
+### 支持矩阵
+
+| 产品 | 支持等级 | 活动/待查看 | 额度 | 跳转 | 2.1.0 数据来源 |
+|---|---|---:|---:|---|---|
+| Codex | 完整支持 | 是 | 是 | 精确任务 | 只读任务索引、未读 ID、事件类型与官方用量服务 |
+| QwenWorkCN | 完整支持 | 是 | 是 | 精确任务 | 只读数据库字段、非消费式待查看集合与桌面桥 |
+| Kimi | 部分支持 | 是 | 是 | Agent 首页 | 有界会话元数据、进程工作目录、聚合额度与 CLI |
+| WorkBuddy | 已发现但未支持 | 否 | 否 | 打开应用 | 应用路径、Bundle ID、版本和运行状态 |
+| TRAE Work | 已发现但未支持 | 否 | 否 | 打开应用 | 应用路径、Bundle ID、版本和运行状态 |
+
+### 首批 Cowork 本机事实
+
+2026-07-28 在 Apple Silicon Mac 上完成以下官方分发包核验：
+
+- WorkBuddy：官网更新通道版本 `5.3.5.34189228`，应用版本 `5.3.5`，应用名 `WorkBuddy.app`，Bundle ID `com.workbuddy.workbuddy`，Developer ID 团队 `FN2V63AD2J`，系统评估为已公证。
+- TRAE Work：中国区下载通道版本 `2.3.59354`，应用内部版本 `0.1.40`，macOS 应用仍命名为 `TRAE SOLO.app`，Bundle ID `com.trae.solo.app`，Developer ID 团队 `79M8227NKH`，系统评估为已公证。
+- 官方公开页面和只读应用包元数据检查尚未给出可验证的任务、额度或单任务跳转契约。2.1.0 不接入应用日志、用户数据库、DOM、调试端口或私有协议。
 
 ### 跳转
 
@@ -82,21 +105,25 @@
 本机AI状态栏
 ├── README.md                         产品说明和快速入口
 ├── docs/
-│   └── PRODUCT_HANDOFF.zh-CN.md     长期交接基线
+│   ├── PRODUCT_HANDOFF.zh-CN.md     长期交接基线
+│   └── FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md
 ├── scripts/
 │   ├── build_app.sh                 根构建入口
 │   ├── generate_app_icon.swift      图标生成
 │   └── qa.sh                        构建、签名、测试、自检、脱敏
+├── tests/
+│   └── AgentAdapterContractTests.swift
 └── skills/codex-recent-tasks-sidebar/
     ├── SKILL.md                     实施与验收规则
     ├── scripts/build_app.sh         实际构建脚本
     └── assets/app-template/
+        ├── AgentAdapter.swift       统一适配器模型与首批发现适配器
         ├── Codex最近任务栏.swift     主应用源码
         ├── Info.plist               App 元数据
         └── AppIcon.icns             App 图标
 ```
 
-当前是单文件原生 Swift 实现。继续增加适配器前，应先拆出统一的数据模型、Agent 适配器协议和展示层，避免把更多产品判断继续堆入主文件。
+统一适配器模型与首批 Cowork 发现逻辑已从主文件拆到 `AgentAdapter.swift`。Codex、QwenWorkCN、Kimi 的既有状态聚合和主要 SwiftUI 展示仍集中在主文件；继续增加可读任务的适配器前，应再拆出状态聚合层、窗口层和视图层。
 
 ## 6. 质量基线
 
@@ -113,6 +140,7 @@
 - Codex、QwenWorkCN、Kimi 固定合成测试库
 - 活动线程、待查看、项目分组和中文名称
 - 三类额度解析、故障恢复和窄栏文案
+- WorkBuddy 与 TRAE Work 的精确 Bundle 匹配、TRAE IDE 排除、元数据最小化和适配器故障隔离
 - 输入文件只读哈希比对
 - 自检和脱敏扫描
 
@@ -124,37 +152,39 @@
 - 跟随 Codex 前后台和单独置顶正确
 - Codex、QwenWorkCN 点击后精确跳转
 - Kimi 只承诺打开 Agent 首页
+- WorkBuddy 与 TRAE Work 只显示安装、运行和支持等级；点击只打开对应应用
 
 终端通过、页面提示或 `ok: true` 都不能单独作为交付证据。必须回读构建产物，并检查真实使用面。
 
 ## 7. 已知限制
 
 - 当前只支持 macOS。
-- 应用采用 ad-hoc 签名，没有 Apple Developer ID 签名和公证。
+- 日常构建采用 ad-hoc 签名。2026-07-28 已生成 Developer ID 签名的 2.1.0（Build 8）候选包并通过 `codesign --verify --deep --strict`，但本机未确认 notarytool 凭据，系统评估仍为 `Unnotarized Developer ID`；不得向外部用户分发。
 - QwenWorkCN 额度依赖桌面端当前提供的本机调试接口，上游变化可能导致暂时不可用。
 - Kimi 总量依赖桌面端已经刷新本机订阅日志；Code 限额依赖已安装且登录的 Kimi CLI。
 - Kimi 活动判断依赖安全可确认的进程工作目录；无法确认时按无活动处理，避免把旧日志误报为运行中。
 - Kimi 尚不能精确跳到单个会话。
-- 当前三款 Agent 的适配逻辑仍集中在主 Swift 文件中，不适合直接扩展到大量产品。
+- WorkBuddy 与 TRAE Work 尚无经过验证的公开任务、额度或精确任务跳转契约。
+- 既有三款 Agent 的主要状态聚合与展示仍集中在主 Swift 文件中，不适合直接扩展到大量深度适配产品。
 
 ## 8. 产品化推进路线
 
-以下均为拟推进事项，不代表已经实现。
+以下条目同时标注 2.1.0 已完成部分与拟推进部分。
 
 ### P0：从固定三款产品变成可扩展平台
 
-1. 建立统一的 Agent 适配器协议，分别定义：
+1. 已完成统一 Agent 适配器基础协议，定义：
    - 产品是否已安装、是否正在运行
    - 活动线程和待查看能力
    - 额度能力
    - 精确跳转能力
    - 数据来源、刷新频率和故障状态
-2. 首次启动只扫描应用和进程元数据，不扫描任务正文。
-3. 把发现结果分成三级：
+2. 已完成 WorkBuddy 与 TRAE Work 的应用和进程元数据扫描，不扫描任务正文。
+3. 已建立三级支持等级：
    - 完整支持：可显示活动线程、额度和跳转
    - 部分支持：只显示能够安全确认的状态
    - 已发现但未支持：只提示产品已存在，不猜测任务或额度
-4. 给每个产品提供独立开关、数据来源说明和权限说明。
+4. 已在悬浮说明中显示首批产品的数据来源和隐私说明；独立开关与完整产品管理页仍为拟推进。
 5. 所有适配器默认“读不到就不显示”，禁止用旧缓存或猜测制造活动状态。
 
 优先否决路径：发现某个 Cowork 产品进程后，直接抓取其日志、数据库或界面文本并尝试通用解析。这样虽然接入快，但会产生隐私风险、误报和上游升级后的不可控故障。
@@ -184,7 +214,7 @@
 
 ### P2：推广验证
 
-- 先邀请少量真实用户，在不同 Mac、不同 Agent 组合上灰度使用。
+- 按 `FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md` 先邀请 3–5 名真实用户，在不同 Mac、不同 Agent 组合上灰度使用。
 - 记录误报、漏报、上游兼容和首次使用完成率，不记录任务内容。
 - 达到稳定门槛后再发布公开版本，不把本机可运行等同于可推广。
 

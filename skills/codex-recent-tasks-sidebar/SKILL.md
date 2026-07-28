@@ -1,6 +1,6 @@
 ---
 name: codex-recent-tasks-sidebar
-description: Build, customize, validate, or repair the native macOS 本机AI状态栏. Use when a user wants a 240-point always-on-top utility that monitors active Codex, QwenWorkCN, and Kimi threads and remaining quota without exposing task content or credentials.
+description: Build, customize, validate, or repair the native macOS 本机AI状态栏. Use for the 240-point always-on-top utility that monitors supported Codex, QwenWorkCN, and Kimi state and safely discovers first-batch Cowork products without exposing task content or credentials.
 ---
 
 # 本机AI状态栏
@@ -12,7 +12,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 1. Confirm macOS 13+ and the presence of `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
 2. Keep all real Codex, QwenWorkCN, and Kimi task stores read-only. Never print, copy, upload, commit, or summarize real task titles, IDs, messages, database rows, session files, credentials, or raw quota responses.
 3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
-4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three agents, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, input hashes, signing, and redaction.
+4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three supported agents, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, WorkBuddy/TRAE Work adapter contracts, failure isolation, input hashes, signing, and redaction.
 5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
 6. Verify the live application without exposing task content:
    - custom icon, Dock entry, and menu bar item exist;
@@ -24,6 +24,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
    - Codex opens the exact `codex://threads/{id}` target;
    - QwenWorkCN opens the exact local Chat ID through its desktop bridge;
    - Kimi opens the Agent page, with exact-session navigation reported as unavailable until a verifiable upstream route exists;
+   - WorkBuddy and TRAE Work show only verified installation/running metadata and the `已发现 · 待适配` level;
    - quota failures degrade to a visible unavailable/stale state without blocking task monitoring.
 
 ## Data adapters
@@ -53,6 +54,17 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Reuse one dedicated monitoring session, save only its session ID, and exclude it from activity results.
 - Never delete diagnostic or monitor sessions without explicit user authorization.
 
+### WorkBuddy and TRAE Work
+
+- Implement discovery through `AgentAdapter.swift`; keep each adapter isolated.
+- WorkBuddy matches only `/Applications/WorkBuddy.app` with Bundle ID `com.workbuddy.workbuddy`.
+- TRAE Work matches only `/Applications/TRAE SOLO.app` with Bundle ID `com.trae.solo.app`; never treat `/Applications/TRAE.app` or the TRAE IDE bundle as TRAE Work.
+- Read only the candidate application path, Bundle ID, display name, version, and `NSRunningApplication` state.
+- Keep both adapters at `discovered` until a stable, independently verified task or quota contract exists.
+- Leave `activeTaskCount` and `quotaSummary` unset. A running process is not an active task.
+- Opening an installed application is allowed; exact task navigation is not claimed.
+- Never inspect WorkBuddy or TRAE Work user data directories, logs, databases, DOM, debug ports, cookies, tokens, or session content for generic adaptation.
+
 ## Presentation rules
 
 - Product name: `本机AI状态栏`.
@@ -62,6 +74,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Render Kimi quota as three compact rows ordered `总量`, `Code 5h`, `Code 7天`, with values formatted as `余 n%`. If the desktop aggregate is unavailable, keep the verified Code rows instead of inventing a total.
 - Keep available Kimi quota values in the neutral secondary text color regardless of the remaining percentage. Reserve the warning color for stale or unavailable quota data.
 - Group active threads by real project name. Do not substitute English demo labels in live UI.
+- Keep WorkBuddy and TRAE Work in a separate `首批 Cowork` section with visible support level and `元数据模式`.
 - Always-on-top is the invariant. Docked versus pinned changes position, not layer.
 - Docking aligns bottom edges, not top edges.
 
@@ -75,6 +88,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Keep task selection keyed by unique IDs; titles are display labels only.
 - Do not present Kimi navigation as exact until a working per-session route is independently verified.
 - Treat upstream schema, local bridge, CLI output, bundle ID, and deep-link changes as adapter failures, not permission to inspect secrets.
+- Do not conflate a product being installed or running with task monitoring support.
 
 ## Delivery report
 
@@ -83,6 +97,7 @@ Report:
 - build app path and architecture;
 - synthetic QA result;
 - privacy-safe live connection result for each agent;
+- WorkBuddy and TRAE Work discovery result and their explicit unsupported task/quota status;
 - icon, Dock, always-on-top, left/right bottom docking, and navigation checks;
 - known limitations and any unverified check;
 - confirmation that `/Applications` was untouched.
