@@ -48,7 +48,8 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Read only the local session index, state metadata, and `context.append_loop_event` records needed to balance `step.begin` and `step.end`.
 - Bound wire-file reads and prefilter event lines before JSON parsing.
 - Treat an unmatched `step.begin` as only an activity candidate. Display it only when a currently running `kimi` executable has the same working directory; fail closed when the process cannot be verified.
-- Read quota through a real PTY invocation of Kimi CLI `/usage`.
+- Read combined Kimi + Code total usage only from the latest `omniRatio` aggregate in a bounded tail of `~/Library/Logs/kimi-desktop/main.log`; never parse or emit unrelated log lines.
+- Read the Code 5-hour and 7-day limits through a real PTY invocation of Kimi CLI `/usage`, normalize current labels such as `5h limit`, and merge them after the total row.
 - Reuse one dedicated monitoring session, save only its session ID, and exclude it from activity results.
 - Never delete diagnostic or monitor sessions without explicit user authorization.
 
@@ -58,7 +59,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Fixed panel width: 240 points.
 - Use compact native macOS typography and system materials.
 - Keep semantic status indicators restrained: running, waiting for action, pending review, unavailable.
-- Render Kimi's independent quota windows on separate compact rows so their periods and remaining percentages are unambiguous.
+- Render Kimi quota as three compact rows ordered `总量`, `5h`, `7天`, with values formatted as `余 n%`. If the desktop aggregate is unavailable, keep the verified Code rows instead of inventing a total.
 - Group active threads by real project name. Do not substitute English demo labels in live UI.
 - Always-on-top is the invariant. Docked versus pinned changes position, not layer.
 - Docking aligns bottom edges, not top edges.
@@ -68,6 +69,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Never write to source task databases, task indexes, rollout/wire files, unread state, or credentials.
 - Never consume or clear QwenWorkCN unread/completion state while monitoring it.
 - Never log real titles, IDs, local usernames, task payloads, quota payloads, or tokens.
+- Never copy or expose Kimi desktop logs; inspect only the bounded aggregate line needed for total usage.
 - Never infer authorization to install or replace `/Applications/本机AI状态栏.app`.
 - Keep task selection keyed by unique IDs; titles are display labels only.
 - Do not present Kimi navigation as exact until a working per-session route is independently verified.
