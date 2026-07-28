@@ -153,9 +153,9 @@ enum CompactQuotaLineFormatter {
     private static func expandedLabel(_ label: String) -> String {
         switch label {
         case "5 小时":
-            return "5h"
+            return "Code 5h"
         case "每周":
-            return "7天"
+            return "Code 7天"
         default:
             return label
         }
