@@ -92,6 +92,34 @@ struct CompactQuotaLine: Equatable, Sendable {
     let value: String
 }
 
+enum QuotaTintRole: Equatable, Sendable {
+    case neutral
+    case warning
+    case critical
+}
+
+enum QuotaTintPolicy {
+    static func role(
+        remainingPercent: Int,
+        isStale: Bool,
+        emphasizesLowBalance: Bool
+    ) -> QuotaTintRole {
+        if isStale {
+            return .warning
+        }
+        guard emphasizesLowBalance else {
+            return .neutral
+        }
+        if remainingPercent <= 10 {
+            return .critical
+        }
+        if remainingPercent <= 30 {
+            return .warning
+        }
+        return .neutral
+    }
+}
+
 enum CompactQuotaLineFormatter {
     static func inline(
         windows: [UsageWindowDisplay],
@@ -4597,13 +4625,19 @@ struct LocalAIStatusView: View {
         tint: Color,
         help: String
     ) {
-        quotaSummary(kimiStore.quotaState, source: "Kimi", expanded: true)
+        quotaSummary(
+            kimiStore.quotaState,
+            source: "Kimi",
+            expanded: true,
+            emphasizesLowBalance: false
+        )
     }
 
     private func quotaSummary(
         _ state: UsageState,
         source: String,
-        expanded: Bool = false
+        expanded: Bool = false,
+        emphasizesLowBalance: Bool = true
     ) -> (lines: [CompactQuotaLine], tint: Color, help: String) {
         switch state {
         case .loading:
@@ -4617,6 +4651,11 @@ struct LocalAIStatusView: View {
                 "\($0.label) \($0.remainingPercent)%"
             }.joined(separator: "，")
             let minimum = windows.map(\.remainingPercent).min() ?? 100
+            let tintRole = QuotaTintPolicy.role(
+                remainingPercent: minimum,
+                isStale: isStale,
+                emphasizesLowBalance: emphasizesLowBalance
+            )
             return (
                 expanded
                     ? CompactQuotaLineFormatter.expanded(
@@ -4627,7 +4666,7 @@ struct LocalAIStatusView: View {
                         windows: windows,
                         isStale: isStale
                     ),
-                isStale ? .orange : quotaColor(minimum),
+                quotaColor(for: tintRole),
                 isStale
                     ? "当前显示上次成功读取的 \(source) 剩余额度"
                     : "\(source) 剩余额度：\(summary)"
@@ -4642,9 +4681,24 @@ struct LocalAIStatusView: View {
     }
 
     private func quotaColor(_ remainingPercent: Int) -> Color {
-        if remainingPercent <= 10 { return .red }
-        if remainingPercent <= 30 { return .orange }
-        return .secondary
+        quotaColor(
+            for: QuotaTintPolicy.role(
+                remainingPercent: remainingPercent,
+                isStale: false,
+                emphasizesLowBalance: true
+            )
+        )
+    }
+
+    private func quotaColor(for role: QuotaTintRole) -> Color {
+        switch role {
+        case .neutral:
+            return .secondary
+        case .warning:
+            return .orange
+        case .critical:
+            return .red
+        }
     }
 
     private func refreshAll() {
