@@ -45,6 +45,7 @@ done
   -warn-concurrency \
   -warnings-as-errors \
   -typecheck \
+  "$ADAPTER_SOURCE" \
   "$SOURCE"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_DIR/Contents/Info.plist")" == "本机AI状态栏" \

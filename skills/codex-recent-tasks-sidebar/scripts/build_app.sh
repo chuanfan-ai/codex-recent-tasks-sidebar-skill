@@ -36,6 +36,7 @@ cp "$TEMPLATE_DIR/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
   -parse-as-library \
   -target "${ARCH}-apple-macos${MIN_MACOS}" \
   -module-cache-path "$MODULE_CACHE" \
+  "$TEMPLATE_DIR/AgentAdapter.swift" \
   "$TEMPLATE_DIR/Codex最近任务栏.swift" \
   -o "$MACOS_DIR/本机AI状态栏"
 

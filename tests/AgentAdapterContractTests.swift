@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 private struct SyntheticApplicationCatalog: ApplicationCatalog {
@@ -148,6 +149,6 @@ private struct AgentAdapterContractTests {
 
     private static func fail(_ message: String) -> Never {
         fputs("AGENT_ADAPTER_CONTRACT_FAILED \(message)\n", stderr)
-        Foundation.exit(1)
+        Darwin.exit(1)
     }
 }
