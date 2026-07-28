@@ -5,6 +5,7 @@ ROOT="${0:A:h:h}"
 BUILD_DIR="$ROOT/build"
 APP_DIR="$BUILD_DIR/本机AI状态栏.app"
 BINARY="$APP_DIR/Contents/MacOS/本机AI状态栏"
+SOURCE="$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift"
 FIXTURE_DIR="$BUILD_DIR/qa-fixture"
 FIXTURE_DB="$FIXTURE_DIR/state.sqlite"
 FIXTURE_INDEX="$FIXTURE_DIR/session_index.jsonl"
@@ -22,6 +23,17 @@ FIXTURE_KIMI_STALE_DIR="$FIXTURE_DIR/kimi-stale"
 FIXTURE_KIMI_MONITOR_DIR="$FIXTURE_DIR/kimi-monitor"
 FIXTURE_KIMI_USAGE="$FIXTURE_DIR/kimi-usage.txt"
 
+if /usr/bin/grep -q "getPendingCompletions" "$SOURCE"; then
+  print -u2 "QwenWorkCN 待查看读取回归为会消费状态的接口"
+  exit 21
+fi
+for unread_store in "agents:unseenChanges" "agents:subChatUnseenChanges"; do
+  /usr/bin/grep -q "$unread_store" "$SOURCE" || {
+    print -u2 "QwenWorkCN 持久化待查看状态适配缺失：$unread_store"
+    exit 22
+  }
+done
+
 "$ROOT/scripts/build_app.sh"
 /usr/bin/swiftc \
   -parse-as-library \
@@ -30,7 +42,7 @@ FIXTURE_KIMI_USAGE="$FIXTURE_DIR/kimi-usage.txt"
   -warn-concurrency \
   -warnings-as-errors \
   -typecheck \
-  "$ROOT/skills/codex-recent-tasks-sidebar/assets/app-template/Codex最近任务栏.swift"
+  "$SOURCE"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_DIR/Contents/Info.plist")" == "本机AI状态栏" \
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DIR/Contents/Info.plist")" == "本机AI状态栏" \
@@ -279,7 +291,7 @@ after_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire
 after_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 after_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }

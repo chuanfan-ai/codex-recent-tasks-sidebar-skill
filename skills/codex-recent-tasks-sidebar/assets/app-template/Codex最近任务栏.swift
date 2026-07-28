@@ -87,6 +87,55 @@ struct AgentQuotaDisplay: Identifiable, Equatable, Sendable {
     var id: String { label }
 }
 
+struct CompactQuotaLine: Equatable, Sendable {
+    let label: String
+    let value: String
+}
+
+enum CompactQuotaLineFormatter {
+    static func inline(
+        windows: [UsageWindowDisplay],
+        isStale: Bool
+    ) -> [CompactQuotaLine] {
+        let summary = windows.map {
+            "\(compactLabel($0.label)) \($0.remainingPercent)%"
+        }.joined(separator: " · ")
+        return [
+            CompactQuotaLine(
+                label: "",
+                value: isStale ? "\(summary) · 延迟" : summary
+            ),
+        ]
+    }
+
+    static func expanded(
+        windows: [UsageWindowDisplay],
+        isStale: Bool
+    ) -> [CompactQuotaLine] {
+        windows.map {
+            CompactQuotaLine(
+                label: $0.label,
+                value: isStale
+                    ? "剩余 \($0.remainingPercent)% · 延迟"
+                    : "剩余 \($0.remainingPercent)%"
+            )
+        }
+    }
+
+    private static func compactLabel(_ label: String) -> String {
+        switch label {
+        case "5 小时":
+            return "5时"
+        case "每周":
+            return "周"
+        case "每月":
+            return "月"
+        default:
+            return label
+        }
+    }
+}
+
 enum QwenUsageSnapshotParser {
     static func quota(from result: [String: Any]) throws -> AgentQuotaDisplay {
         let payload = (result["json"] as? [String: Any]) ?? result
@@ -408,14 +457,31 @@ struct QwenTaskRepository {
     """
 
     static func loadActiveTasks(
-        pendingChatIDs explicitPendingChatIDs: Set<String>? = nil
+        unreadChatIDs explicitUnreadChatIDs: Set<String>? = nil,
+        unreadSubChatIDs explicitUnreadSubChatIDs: Set<String>? = nil
     ) throws -> (databaseURL: URL, tasks: [LocalAgentTask]) {
         let databaseURL = try currentDatabaseURL()
         let records: [QwenTaskRecord] = try SQLiteJSONReader.read(
             databaseURL: databaseURL,
             query: query
         )
-        let pendingChatIDs = explicitPendingChatIDs ?? pendingChatIDsOverride()
+        let unreadChatIDs = explicitUnreadChatIDs
+            ?? identifierOverride(named: "QWEN_UNREAD_CHAT_IDS_OVERRIDE")
+        let unreadSubChatIDs = explicitUnreadSubChatIDs
+            ?? identifierOverride(named: "QWEN_UNREAD_SUBCHAT_IDS_OVERRIDE")
+        let chatsWithSpecificUnreadSubChat = Set(
+            records.compactMap { record in
+                unreadSubChatIDs.contains(record.id) ? record.chatID : nil
+            }
+        )
+        var unreadRecordIDs = unreadSubChatIDs
+        var representedChatIDs = Set<String>()
+        for record in records
+        where unreadChatIDs.contains(record.chatID)
+            && !chatsWithSpecificUnreadSubChat.contains(record.chatID)
+            && representedChatIDs.insert(record.chatID).inserted {
+            unreadRecordIDs.insert(record.id)
+        }
         let tasks = records.compactMap { record -> LocalAgentTask? in
             let runtimeState = QwenTaskStatusParser.runtimeState(
                 taskStatus: record.taskStatus,
@@ -423,7 +489,7 @@ struct QwenTaskRepository {
             )
             let displayState = TaskDisplayState.resolve(
                 runtimeState: runtimeState,
-                hasUnreadUpdate: pendingChatIDs.contains(record.chatID)
+                hasUnreadUpdate: unreadRecordIDs.contains(record.id)
             )
             guard ActivityTaskPolicy.includes(displayState) else {
                 return nil
@@ -447,10 +513,8 @@ struct QwenTaskRepository {
         return (databaseURL, tasks)
     }
 
-    private static func pendingChatIDsOverride() -> Set<String> {
-        guard let rawValue = ProcessInfo.processInfo.environment[
-            "QWEN_PENDING_CHAT_IDS_OVERRIDE"
-        ] else {
+    private static func identifierOverride(named environmentKey: String) -> Set<String> {
+        guard let rawValue = ProcessInfo.processInfo.environment[environmentKey] else {
             return []
         }
         return Set(
@@ -520,7 +584,153 @@ enum KimiMonitorSession {
     }
 }
 
+enum KimiMonitorDirectory {
+    static func url(createIfNeeded: Bool = true) throws -> URL {
+        let fileManager = FileManager.default
+        let url: URL
+        if let override = ProcessInfo.processInfo.environment[
+            "KIMI_MONITOR_DIRECTORY_OVERRIDE"
+        ], !override.isEmpty {
+            url = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            let baseURL = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: createIfNeeded
+            )
+            url = baseURL
+                .appendingPathComponent("本机AI状态栏", isDirectory: true)
+                .appendingPathComponent("Kimi额度监控", isDirectory: true)
+        }
+        if createIfNeeded {
+            try fileManager.createDirectory(
+                at: url,
+                withIntermediateDirectories: true
+            )
+        }
+        return url
+    }
+}
+
+enum KimiProcessInspector {
+    private static let maximumOutputSize = 4 * 1024 * 1024
+
+    static func activeWorkDirectoryCounts() -> [String: Int] {
+        if let override = ProcessInfo.processInfo.environment[
+            "KIMI_ACTIVE_WORK_DIRS_OVERRIDE"
+        ] {
+            return workDirectoryCounts(
+                override.split(separator: ",").map(String.init)
+            )
+        }
+
+        guard let processData = commandOutput(
+            executable: "/bin/ps",
+            arguments: ["-axo", "pid=,comm="]
+        ),
+        let processText = String(data: processData, encoding: .utf8) else {
+            return [:]
+        }
+        let monitorPath = (try? KimiMonitorDirectory.url(createIfNeeded: false))
+            .map { canonicalPath($0.path) }
+        var workDirectories: [String] = []
+        for line in processText.split(
+            separator: "\n",
+            omittingEmptySubsequences: true
+        ) {
+            let fields = line.split(
+                maxSplits: 1,
+                omittingEmptySubsequences: true,
+                whereSeparator: \.isWhitespace
+            )
+            guard fields.count == 2,
+                  let processID = Int32(fields[0]),
+                  URL(fileURLWithPath: String(fields[1]))
+                    .lastPathComponent == "kimi",
+                  let workDirectory = currentWorkingDirectory(
+                      processID: processID
+                  ) else {
+                continue
+            }
+            let canonicalWorkDirectory = canonicalPath(workDirectory)
+            if canonicalWorkDirectory != monitorPath {
+                workDirectories.append(canonicalWorkDirectory)
+            }
+        }
+        return workDirectoryCounts(workDirectories)
+    }
+
+    static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
+
+    private static func workDirectoryCounts(_ paths: [String]) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for path in paths {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.utf8.count <= 4_096 else {
+                continue
+            }
+            counts[canonicalPath(trimmed), default: 0] += 1
+        }
+        return counts
+    }
+
+    private static func currentWorkingDirectory(processID: Int32) -> String? {
+        guard let data = commandOutput(
+            executable: "/usr/sbin/lsof",
+            arguments: [
+                "-a",
+                "-p", String(processID),
+                "-d", "cwd",
+                "-Fn",
+            ]
+        ),
+        let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return text.split(separator: "\n").compactMap { line -> String? in
+            guard line.first == "n" else { return nil }
+            let path = String(line.dropFirst())
+            return path.isEmpty ? nil : path
+        }.first
+    }
+
+    private static func commandOutput(
+        executable: String,
+        arguments: [String]
+    ) -> Data? {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              data.count <= maximumOutputSize else {
+            return nil
+        }
+        return data
+    }
+}
+
 struct KimiTaskRepository {
+    private struct Candidate {
+        let task: LocalAgentTask
+        let canonicalWorkDirectory: String
+    }
+
     private static let maximumIndexSize = 32 * 1024 * 1024
     private static let maximumStateSize = 2 * 1024 * 1024
     private static let maximumWireTailSize = 16 * 1024 * 1024
@@ -554,7 +764,7 @@ struct KimiTaskRepository {
         let monitorSessionID = ProcessInfo.processInfo.environment[
             "KIMI_MONITOR_SESSION_ID_OVERRIDE"
         ] ?? KimiMonitorSession.storedID()
-        let tasks = latestRecords.values.compactMap { record -> LocalAgentTask? in
+        let candidates = latestRecords.values.compactMap { record -> Candidate? in
             guard record.sessionID != monitorSessionID,
                   let sessionURL = validatedSessionURL(
                       path: record.sessionDir,
@@ -572,19 +782,34 @@ struct KimiTaskRepository {
                 from: state.updatedAt,
                 fallbackURL: sessionURL.appendingPathComponent("agents/main/wire.jsonl")
             )
-            return LocalAgentTask(
-                id: record.sessionID,
-                agent: .kimi,
-                title: title,
-                projectName: CodexProjectNameResolver.projectName(for: workDir),
-                projectPath: workDir,
-                updatedMillis: updatedMillis,
-                displayState: .running,
-                navigationID: record.sessionID
+            return Candidate(
+                task: LocalAgentTask(
+                    id: record.sessionID,
+                    agent: .kimi,
+                    title: title,
+                    projectName: CodexProjectNameResolver.projectName(for: workDir),
+                    projectPath: workDir,
+                    updatedMillis: updatedMillis,
+                    displayState: .running,
+                    navigationID: record.sessionID
+                ),
+                canonicalWorkDirectory: KimiProcessInspector.canonicalPath(workDir)
             )
         }.sorted {
-            if $0.updatedMillis == $1.updatedMillis { return $0.id < $1.id }
-            return $0.updatedMillis > $1.updatedMillis
+            if $0.task.updatedMillis == $1.task.updatedMillis {
+                return $0.task.id < $1.task.id
+            }
+            return $0.task.updatedMillis > $1.task.updatedMillis
+        }
+        var remainingProcessCounts = KimiProcessInspector.activeWorkDirectoryCounts()
+        let tasks = candidates.compactMap { candidate -> LocalAgentTask? in
+            let workDirectory = candidate.canonicalWorkDirectory
+            guard let count = remainingProcessCounts[workDirectory],
+                  count > 0 else {
+                return nil
+            }
+            remainingProcessCounts[workDirectory] = count - 1
+            return candidate.task
         }
         return (indexURL, tasks)
     }
@@ -811,7 +1036,7 @@ final class KimiUsageClient: @unchecked Sendable {
 
         let executableURL = try executableURL()
         let indexURL = try sessionIndexURL()
-        let monitorDirectory = try monitorDirectoryURL()
+        let monitorDirectory = try KimiMonitorDirectory.url()
         let storedSessionID = KimiMonitorSession.storedID()
         let currentRecords = try sessionRecords(at: indexURL)
         let reusableSessionID = storedSessionID.flatMap { sessionID in
@@ -1014,34 +1239,6 @@ final class KimiUsageClient: @unchecked Sendable {
         return executable
     }
 
-    private static func monitorDirectoryURL() throws -> URL {
-        let fileManager = FileManager.default
-        if let override = ProcessInfo.processInfo.environment[
-            "KIMI_MONITOR_DIRECTORY_OVERRIDE"
-        ], !override.isEmpty {
-            let url = URL(fileURLWithPath: override, isDirectory: true)
-            try fileManager.createDirectory(
-                at: url,
-                withIntermediateDirectories: true
-            )
-            return url
-        }
-        let baseURL = try fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let url = baseURL
-            .appendingPathComponent("本机AI状态栏", isDirectory: true)
-            .appendingPathComponent("Kimi额度监控", isDirectory: true)
-        try fileManager.createDirectory(
-            at: url,
-            withIntermediateDirectories: true
-        )
-        return url
-    }
-
     private static func boundedData(
         at url: URL,
         maximumSize: Int = maximumOutputSize
@@ -1102,7 +1299,8 @@ private enum SQLiteJSONReader {
 
 struct QwenDesktopSnapshot: Equatable, Sendable {
     let quota: AgentQuotaDisplay
-    let pendingChatIDs: Set<String>
+    let unreadChatIDs: Set<String>
+    let unreadSubChatIDs: Set<String>
 }
 
 enum QwenDesktopError: LocalizedError {
@@ -1128,8 +1326,18 @@ enum QwenDesktopError: LocalizedError {
 enum QwenDesktopSnapshotParser {
     static func snapshot(from result: [String: Any]) throws -> QwenDesktopSnapshot {
         let quota = try QwenUsageSnapshotParser.quota(from: result)
-        let rawPendingIDs = result["pendingChatIDs"] as? [Any] ?? []
-        let pendingChatIDs = Set(rawPendingIDs.compactMap { value -> String? in
+        let unreadChatIDs = identifiers(from: result["unreadChatIDs"])
+        let unreadSubChatIDs = identifiers(from: result["unreadSubChatIDs"])
+        return QwenDesktopSnapshot(
+            quota: quota,
+            unreadChatIDs: unreadChatIDs,
+            unreadSubChatIDs: unreadSubChatIDs
+        )
+    }
+
+    private static func identifiers(from rawValue: Any?) -> Set<String> {
+        let rawIdentifiers = rawValue as? [Any] ?? []
+        return Set(rawIdentifiers.compactMap { value -> String? in
             guard let chatID = value as? String,
                   !chatID.isEmpty,
                   chatID.utf8.count <= 256 else {
@@ -1137,7 +1345,6 @@ enum QwenDesktopSnapshotParser {
             }
             return chatID
         })
-        return QwenDesktopSnapshot(quota: quota, pendingChatIDs: pendingChatIDs)
     }
 }
 
@@ -1153,8 +1360,7 @@ final class QwenDesktopBridge: @unchecked Sendable {
     private static let bundleIdentifier = "cn.qwenwork.desktop.mac"
     private static let maximumFixtureSize = 1 * 1024 * 1024
     private static let snapshotExpression = """
-    Promise.all([
-      new Promise((resolve) => {
+    new Promise((resolve) => {
         const id = 741852963;
         let completed = false;
         const finish = (value) => {
@@ -1180,16 +1386,20 @@ final class QwenDesktopBridge: @unchecked Sendable {
           }
         });
         setTimeout(() => finish(null), 5000);
-      }),
-      desktopApi.getPendingCompletions().catch(() => [])
-    ]).then(([quota, pending]) => {
-      const pendingChatIDs = Array.isArray(pending)
-        ? pending.map((item) => {
-            if (typeof item === "string") return item;
-            if (!item || typeof item !== "object") return null;
-            return item.chatId || item.chatID || item.id || null;
-          }).filter((value) => typeof value === "string").slice(0, 1000)
-        : [];
+      }).then((quota) => {
+      const readIdentifierSet = (key) => {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+          if (!Array.isArray(parsed)) return [];
+          return parsed.filter((value) => (
+            typeof value === "string"
+              && value.length > 0
+              && new TextEncoder().encode(value).length <= 256
+          )).slice(0, 1000);
+        } catch {
+          return [];
+        }
+      };
       if (!quota) return { ok: false };
       return {
         ok: true,
@@ -1200,7 +1410,8 @@ final class QwenDesktopBridge: @unchecked Sendable {
           percentage: quota.percentage,
           unit: quota.unit
         },
-        pendingChatIDs
+        unreadChatIDs: readIdentifierSet("agents:unseenChanges"),
+        unreadSubChatIDs: readIdentifierSet("agents:subChatUnseenChanges")
       };
     })
     """
@@ -3069,11 +3280,13 @@ final class QwenStore: ObservableObject {
                 snapshot = nil
                 bridgeError = error.localizedDescription
             }
-            let pendingChatIDs = snapshot?.pendingChatIDs ?? []
+            let unreadChatIDs = snapshot?.unreadChatIDs ?? []
+            let unreadSubChatIDs = snapshot?.unreadSubChatIDs ?? []
             let outcome = await Task.detached(priority: .utility) {
                 do {
                     let loaded = try QwenTaskRepository.loadActiveTasks(
-                        pendingChatIDs: pendingChatIDs
+                        unreadChatIDs: unreadChatIDs,
+                        unreadSubChatIDs: unreadSubChatIDs
                     )
                     return LocalAgentTaskLoadOutcome(
                         sourcePath: loaded.databaseURL.path,
@@ -3833,7 +4046,7 @@ struct CompactActivityRowView: View {
 
 struct CompactAgentSectionView: View {
     let agent: AgentKind
-    let quotaText: String
+    let quotaLines: [CompactQuotaLine]
     let quotaTint: Color
     let quotaHelp: String
     let tasks: [ActivityRowModel]
@@ -3842,6 +4055,10 @@ struct CompactAgentSectionView: View {
 
     private var groups: [ActivityProjectGroup] {
         ActivityProjectGroup.grouped(tasks)
+    }
+
+    private var usesExpandedQuotaLayout: Bool {
+        quotaLines.contains { !$0.label.isEmpty }
     }
 
     var body: some View {
@@ -3868,15 +4085,44 @@ struct CompactAgentSectionView: View {
 
                 Spacer(minLength: 4)
 
-                Text(quotaText)
-                    .font(.system(size: 8.8, weight: .medium))
-                    .foregroundStyle(quotaTint)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(quotaHelp)
+                if !usesExpandedQuotaLayout, let quotaLine = quotaLines.first {
+                    Text(quotaLine.value)
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(quotaTint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(quotaHelp)
+                }
             }
             .padding(.horizontal, 8)
             .frame(height: 30)
+
+            if usesExpandedQuotaLayout {
+                VStack(spacing: 2) {
+                    ForEach(quotaLines.indices, id: \.self) { index in
+                        let line = quotaLines[index]
+                        HStack(spacing: 6) {
+                            Text(line.label)
+                                .foregroundStyle(.tertiary)
+                            Spacer(minLength: 4)
+                            Text(line.value)
+                                .foregroundStyle(quotaTint)
+                        }
+                        .font(.system(size: 8.8, weight: .medium))
+                        .lineLimit(1)
+                    }
+                }
+                .padding(.leading, 29)
+                .padding(.trailing, 9)
+                .padding(.bottom, 6)
+                .help(quotaHelp)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "\(agent.displayName)额度，"
+                        + quotaLines.map { "\($0.label)\($0.value)" }
+                            .joined(separator: "，")
+                )
+            }
 
             if groups.isEmpty {
                 HStack(spacing: 5) {
@@ -4007,7 +4253,7 @@ struct LocalAIStatusView: View {
                 LazyVStack(spacing: 0) {
                     CompactAgentSectionView(
                         agent: .codex,
-                        quotaText: codexQuota.text,
+                        quotaLines: codexQuota.lines,
                         quotaTint: codexQuota.tint,
                         quotaHelp: codexQuota.help,
                         tasks: codexTasks,
@@ -4016,7 +4262,7 @@ struct LocalAIStatusView: View {
                     )
                     CompactAgentSectionView(
                         agent: .qwen,
-                        quotaText: qwenQuota.text,
+                        quotaLines: qwenQuota.lines,
                         quotaTint: qwenQuota.tint,
                         quotaHelp: qwenQuota.help,
                         tasks: qwenTasks,
@@ -4025,7 +4271,7 @@ struct LocalAIStatusView: View {
                     )
                     CompactAgentSectionView(
                         agent: .kimi,
-                        quotaText: kimiQuota.text,
+                        quotaLines: kimiQuota.lines,
                         quotaTint: kimiQuota.tint,
                         quotaHelp: kimiQuota.help,
                         tasks: kimiTasks,
@@ -4191,67 +4437,96 @@ struct LocalAIStatusView: View {
         return .green
     }
 
-    private var codexQuota: (text: String, tint: Color, help: String) {
+    private var codexQuota: (
+        lines: [CompactQuotaLine],
+        tint: Color,
+        help: String
+    ) {
         quotaSummary(codexUsageStore.state, source: "Codex")
     }
 
-    private var qwenQuota: (text: String, tint: Color, help: String) {
+    private var qwenQuota: (
+        lines: [CompactQuotaLine],
+        tint: Color,
+        help: String
+    ) {
         switch qwenStore.quotaState {
         case .loading:
-            return ("读取中", .secondary, "正在读取 QwenWorkCN 剩余积分")
+            return (
+                [CompactQuotaLine(label: "", value: "读取中")],
+                .secondary,
+                "正在读取 QwenWorkCN 剩余积分"
+            )
         case let .available(quota, isStale):
             let value = quota.remainingValueText.map { "余\($0)分" }
                 ?? "余\(quota.remainingPercent)%"
             return (
-                isStale ? "\(value) · 延迟" : value,
+                [
+                    CompactQuotaLine(
+                        label: "",
+                        value: isStale ? "\(value) · 延迟" : value
+                    ),
+                ],
                 isStale ? .orange : quotaColor(quota.remainingPercent),
                 isStale
                     ? "当前显示上次成功读取的 QwenWorkCN 剩余积分"
                     : "QwenWorkCN 剩余积分 \(value)"
             )
         case let .unavailable(message):
-            return ("额度不可用", .orange, message)
+            return (
+                [CompactQuotaLine(label: "", value: "额度不可用")],
+                .orange,
+                message
+            )
         }
     }
 
-    private var kimiQuota: (text: String, tint: Color, help: String) {
-        quotaSummary(kimiStore.quotaState, source: "Kimi")
+    private var kimiQuota: (
+        lines: [CompactQuotaLine],
+        tint: Color,
+        help: String
+    ) {
+        quotaSummary(kimiStore.quotaState, source: "Kimi", expanded: true)
     }
 
     private func quotaSummary(
         _ state: UsageState,
-        source: String
-    ) -> (text: String, tint: Color, help: String) {
+        source: String,
+        expanded: Bool = false
+    ) -> (lines: [CompactQuotaLine], tint: Color, help: String) {
         switch state {
         case .loading:
-            return ("读取中", .secondary, "正在读取 \(source) 剩余额度")
+            return (
+                [CompactQuotaLine(label: "", value: "读取中")],
+                .secondary,
+                "正在读取 \(source) 剩余额度"
+            )
         case let .available(windows, isStale):
             let summary = windows.map {
-                "\(compactQuotaLabel($0.label)) \($0.remainingPercent)%"
-            }.joined(separator: " · ")
+                "\($0.label) \($0.remainingPercent)%"
+            }.joined(separator: "，")
             let minimum = windows.map(\.remainingPercent).min() ?? 100
             return (
-                isStale ? "\(summary) · 延迟" : summary,
+                expanded
+                    ? CompactQuotaLineFormatter.expanded(
+                        windows: windows,
+                        isStale: isStale
+                    )
+                    : CompactQuotaLineFormatter.inline(
+                        windows: windows,
+                        isStale: isStale
+                    ),
                 isStale ? .orange : quotaColor(minimum),
                 isStale
                     ? "当前显示上次成功读取的 \(source) 剩余额度"
                     : "\(source) 剩余额度：\(summary)"
             )
         case let .unavailable(message):
-            return ("额度不可用", .orange, message)
-        }
-    }
-
-    private func compactQuotaLabel(_ label: String) -> String {
-        switch label {
-        case "5 小时":
-            return "5时"
-        case "每周":
-            return "周"
-        case "每月":
-            return "月"
-        default:
-            return label
+            return (
+                [CompactQuotaLine(label: "", value: "额度不可用")],
+                .orange,
+                message
+            )
         }
     }
 
@@ -4886,6 +5161,19 @@ enum SelfTest {
                 fputs("SELF_TEST_FAILED Kimi usage parsing\n", stderr)
                 return 25
             }
+            guard CompactQuotaLineFormatter.expanded(
+                windows: [
+                    UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
+                    UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                ],
+                isStale: false
+            ) == [
+                CompactQuotaLine(label: "5 小时", value: "剩余 60%"),
+                CompactQuotaLine(label: "每周", value: "剩余 10%"),
+            ] else {
+                fputs("SELF_TEST_FAILED Kimi quota line layout\n", stderr)
+                return 34
+            }
 
             let sanitizedEnvironment = KimiProcessEnvironment.sanitized([
                 "HOME": "/tmp/synthetic-home",
@@ -4994,7 +5282,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
@@ -5156,14 +5444,17 @@ enum QwenBridgeSelfTest {
                     remainingPercent: 72,
                     remainingValueText: "724.5"
                 ),
-                snapshot.pendingChatIDs == Set(["qwen-chat-review"]) else {
+                snapshot.unreadChatIDs == Set(["qwen-chat-review"]),
+                snapshot.unreadSubChatIDs == Set(["qwen-sub-review"]) else {
                     fputs("QWEN_BRIDGE_SELF_TEST_FAILED unexpected values\n", stderr)
                     return 41
                 }
-                print("QWEN_BRIDGE_SELF_TEST_OK pending=1 quota=ok")
+                print(
+                    "QWEN_BRIDGE_SELF_TEST_OK unread_chat=1 unread_subchat=1 quota=ok"
+                )
             } else {
                 print(
-                    "QWEN_BRIDGE_PROBE_OK pending=\(snapshot.pendingChatIDs.count) quota=ok"
+                    "QWEN_BRIDGE_PROBE_OK unread_chat=\(snapshot.unreadChatIDs.count) unread_subchat=\(snapshot.unreadSubChatIDs.count) quota=ok"
                 )
             }
             return 0
@@ -5269,7 +5560,8 @@ enum LiveActivityProbe {
                 do {
                     let snapshot = try await QwenDesktopBridge.fetchSnapshot()
                     let count = try QwenTaskRepository.loadActiveTasks(
-                        pendingChatIDs: snapshot.pendingChatIDs
+                        unreadChatIDs: snapshot.unreadChatIDs,
+                        unreadSubChatIDs: snapshot.unreadSubChatIDs
                     ).tasks.count
                     qwenBox.store(.success(count))
                 } catch {
@@ -5339,7 +5631,8 @@ enum LiveNavigationProbe {
                 do {
                     let snapshot = try await QwenDesktopBridge.fetchSnapshot()
                     guard let task = try QwenTaskRepository.loadActiveTasks(
-                        pendingChatIDs: snapshot.pendingChatIDs
+                        unreadChatIDs: snapshot.unreadChatIDs,
+                        unreadSubChatIDs: snapshot.unreadSubChatIDs
                     ).tasks.first else {
                         resultBox.store(false)
                         semaphore.signal()
