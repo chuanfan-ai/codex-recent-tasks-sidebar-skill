@@ -225,6 +225,78 @@ private struct AgentAdapterContractTests {
             fail("first-batch order")
         }
 
+        let kimiWorkStatuses = Data(
+            """
+            {
+              "synthetic-running": "running",
+              "synthetic-blocked": "blocked",
+              "synthetic-completed-unread": "completed",
+              "synthetic-completed-read": "completed",
+              "synthetic-unsupported": "paused"
+            }
+            """.utf8
+        )
+        let kimiWorkUnread = Data(
+            """
+            [
+              "synthetic-completed-unread",
+              "synthetic-unread-only"
+            ]
+            """.utf8
+        )
+        let kimiWorkTitles = Data(
+            """
+            {
+              "synthetic-running": "Kimi Work 中文运行线程",
+              "synthetic-blocked": "  Kimi Work 中文待处理线程  ",
+              "synthetic-completed-unread": "Kimi Work 中文待查看线程",
+              "synthetic-completed-read": "不应显示的已读线程"
+            }
+            """.utf8
+        )
+        guard KimiWorkStatusParser.activeRecords(
+            statusData: kimiWorkStatuses,
+            unreadData: kimiWorkUnread,
+            titleData: kimiWorkTitles
+        ) == [
+            KimiWorkActivityRecord(
+                conversationKey: "synthetic-blocked",
+                title: "Kimi Work 中文待处理线程",
+                state: .needsAction
+            ),
+            KimiWorkActivityRecord(
+                conversationKey: "synthetic-running",
+                title: "Kimi Work 中文运行线程",
+                state: .running
+            ),
+            KimiWorkActivityRecord(
+                conversationKey: "synthetic-completed-unread",
+                title: "Kimi Work 中文待查看线程",
+                state: .needsReview
+            ),
+            KimiWorkActivityRecord(
+                conversationKey: "synthetic-unread-only",
+                title: nil,
+                state: .needsReview
+            ),
+        ] else {
+            fail("Kimi Work active status parsing")
+        }
+        guard KimiWorkStatusParser.activeRecords(
+            statusData: Data("{}".utf8),
+            unreadData: Data("[]".utf8),
+            titleData: nil
+        ) == [] else {
+            fail("Kimi Work empty status parsing")
+        }
+        guard KimiWorkStatusParser.activeRecords(
+            statusData: Data("[]".utf8),
+            unreadData: Data("{}".utf8),
+            titleData: nil
+        ) == nil else {
+            fail("Kimi Work invalid status parsing")
+        }
+
         let sidecarPayload = Data(
             """
             {
@@ -347,6 +419,7 @@ private struct AgentAdapterContractTests {
 
         print(
             "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok "
+                + "kimi_work_status=ok "
                 + "workbuddy_public_sessions=ok invalid_response=ok "
                 + "trae_ide_excluded=ok version_gate=ok isolation=ok "
                 + "presentation=ok"
