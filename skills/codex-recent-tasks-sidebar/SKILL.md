@@ -60,6 +60,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Use compact native macOS typography and system materials.
 - Keep semantic status indicators restrained: running, waiting for action, pending review, unavailable.
 - Render Kimi quota as three compact rows ordered `总量`, `5h`, `7天`, with values formatted as `余 n%`. If the desktop aggregate is unavailable, keep the verified Code rows instead of inventing a total.
+- Keep available Kimi quota values in the neutral secondary text color regardless of the remaining percentage. Reserve the warning color for stale or unavailable quota data.
 - Group active threads by real project name. Do not substitute English demo labels in live UI.
 - Always-on-top is the invariant. Docked versus pinned changes position, not layer.
 - Docking aligns bottom edges, not top edges.
