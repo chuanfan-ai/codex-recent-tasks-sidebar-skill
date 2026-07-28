@@ -3630,14 +3630,25 @@ final class AgentDiscoveryStore: ObservableObject {
     private let registry: AgentAdapterRegistry
     private let catalog: any ApplicationCatalog
     private var refreshTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
 
     init(
-        registry: AgentAdapterRegistry = .firstBatch,
-        catalog: any ApplicationCatalog = LocalApplicationCatalog(),
+        registry: AgentAdapterRegistry? = nil,
+        catalog: (any ApplicationCatalog)? = nil,
         refreshInterval: TimeInterval? = 30
     ) {
-        self.registry = registry
-        self.catalog = catalog
+        let usesSyntheticProducts =
+            ProcessInfo.processInfo.environment[
+                "LOCAL_AI_STATUSBAR_SYNTHETIC_AGENT_PRODUCTS"
+            ] == "1"
+        self.registry = registry ?? (
+            usesSyntheticProducts ? .syntheticQA : .firstBatch
+        )
+        self.catalog = catalog ?? (
+            usesSyntheticProducts
+                ? SyntheticAgentProductApplicationCatalog()
+                : LocalApplicationCatalog()
+        )
         refresh()
         if let refreshInterval {
             refreshTimer = Timer.scheduledTimer(
@@ -3654,12 +3665,22 @@ final class AgentDiscoveryStore: ObservableObject {
 
     deinit {
         refreshTimer?.invalidate()
+        refreshTask?.cancel()
     }
 
     func refresh() {
-        let updatedSnapshots = registry.snapshots(using: catalog)
-        if snapshots != updatedSnapshots {
-            snapshots = updatedSnapshots
+        guard refreshTask == nil else { return }
+        let registry = registry
+        let catalog = catalog
+        refreshTask = Task { [weak self] in
+            let updatedSnapshots = await registry.snapshots(
+                using: catalog
+            )
+            guard let self, !Task.isCancelled else { return }
+            if snapshots != updatedSnapshots {
+                snapshots = updatedSnapshots
+            }
+            refreshTask = nil
         }
     }
 
@@ -4398,68 +4419,154 @@ struct DiscoveredProductSectionView: View {
 
     var body: some View {
         let presentation = snapshot.presentation
-        Button(action: openApplication) {
-            HStack(spacing: 6) {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(productTint)
-                    .frame(width: 14)
+        VStack(spacing: 0) {
+            Button(action: openApplication) {
+                HStack(spacing: 6) {
+                    productIcon
 
-                Text(snapshot.descriptor.displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+                    Text(snapshot.descriptor.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
-                Spacer(minLength: 4)
+                    Text(snapshot.activeTaskCount.map(String.init) ?? "—")
+                        .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(
+                            snapshot.activeTaskCount == nil
+                                ? Color.secondary : productTint
+                        )
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            (
+                                snapshot.activeTaskCount == nil
+                                    ? Color.secondary : productTint
+                            ).opacity(0.1),
+                            in: Capsule()
+                        )
 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(healthTint)
-                        .frame(width: 5, height: 5)
-                    Text(presentation.statusText)
+                    Spacer(minLength: 4)
+
+                    Text(snapshot.quotaSummary ?? "余额 —")
                         .font(.system(size: 8.8, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help(quotaHelpText)
                 }
+                .padding(.horizontal, 8)
+                .frame(height: 30)
+                .background(
+                    isHovering && presentation.canOpenApplication
+                        ? Color.primary.opacity(0.055) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 8)
-            .frame(height: 30)
-            .background(
-                isHovering && presentation.canOpenApplication
-                    ? Color.primary.opacity(0.055) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .buttonStyle(.plain)
+            .disabled(!presentation.canOpenApplication)
+            .onHover { isHovering = $0 }
+            .help(helpText)
+            .accessibilityLabel(
+                "\(snapshot.descriptor.displayName)，"
+                    + "\(presentation.statusText)，"
+                    + "\(presentation.supportText)"
             )
-            .contentShape(Rectangle())
+            .accessibilityHint(
+                presentation.canOpenApplication
+                    ? "打开应用" : "当前未安装"
+            )
+
+            if snapshot.threads.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: threadPlaceholderSymbol)
+                        .font(.system(size: 9))
+                    Text(threadPlaceholderText)
+                        .font(.system(size: 9.5))
+                }
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 29)
+                .frame(height: 26)
+                .help(dataAvailabilityHelpText)
+            } else {
+                VStack(spacing: 1) {
+                    ForEach(snapshot.threads) { thread in
+                        Button(action: openApplication) {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(
+                                        thread.state == .running
+                                            ? productTint : Color.secondary
+                                    )
+                                    .frame(width: 5, height: 5)
+
+                                Text(thread.title)
+                                    .font(.system(size: 10, weight: .regular))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+
+                                Spacer(minLength: 3)
+
+                                Text(thread.state.displayText)
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                    .foregroundStyle(
+                                        thread.state == .running
+                                            ? productTint : Color.secondary
+                                    )
+                                    .fixedSize()
+                            }
+                            .padding(.horizontal, 7)
+                            .frame(height: 24)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!presentation.canOpenApplication)
+                        .help(
+                            "\(snapshot.descriptor.displayName)\n"
+                                + "线程：\(thread.title)\n"
+                                + "状态：\(thread.state.displayText)\n"
+                                + "最近活动："
+                                + TimeLabelFormatter.fullLabel(
+                                    milliseconds: thread.updatedMillis
+                                )
+                        )
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 7)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!presentation.canOpenApplication)
-        .onHover { isHovering = $0 }
-        .help(helpText)
-        .accessibilityLabel(
-            "\(snapshot.descriptor.displayName)，\(presentation.statusText)，"
-                + "\(presentation.supportText)"
-        )
-        .accessibilityHint(
-            presentation.canOpenApplication
-                ? "打开应用；当前不读取任务和额度"
-                : "当前未安装"
-        )
         .background(Color.primary.opacity(0.018))
         .overlay(alignment: .bottom) {
             Divider().opacity(0.35)
         }
     }
 
-    private var healthTint: Color {
-        switch snapshot.health {
-        case .running:
-            return .green
-        case .detected:
-            return .accentColor
-        case .notInstalled:
-            return .secondary
-        case .inspectionFailed:
-            return .orange
+    @ViewBuilder
+    private var productIcon: some View {
+        if let brandMarkPath = snapshot.officialBrandMarkPath,
+           let brandMark = NSImage(contentsOfFile: brandMarkPath) {
+            Image(nsImage: brandMark)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .accessibilityHidden(true)
+        } else if let iconPath = snapshot.iconApplicationPath {
+            let applicationIcon = NSWorkspace.shared.icon(forFile: iconPath)
+            Image(nsImage: applicationIcon)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: fallbackSymbol)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(productTint)
+                .frame(width: 16)
+                .accessibilityHidden(true)
         }
     }
 
@@ -4472,6 +4579,43 @@ struct DiscoveredProductSectionView: View {
         default:
             return .accentColor
         }
+    }
+
+    private var fallbackSymbol: String {
+        switch snapshot.descriptor.id {
+        case "workbuddy":
+            return "sparkles"
+        case "trae-work":
+            return "triangle.fill"
+        default:
+            return "app.dashed"
+        }
+    }
+
+    private var threadPlaceholderSymbol: String {
+        snapshot.dataAvailability == .available
+            ? "checkmark.circle" : "minus.circle"
+    }
+
+    private var threadPlaceholderText: String {
+        snapshot.dataAvailability == .available
+            ? "无活动线程" : "线程 —"
+    }
+
+    private var dataAvailabilityHelpText: String {
+        switch snapshot.dataAvailability {
+        case .available:
+            return "当前没有公开接口返回的活动线程"
+        case let .unavailable(message):
+            return message
+        }
+    }
+
+    private var quotaHelpText: String {
+        if let quotaSummary = snapshot.quotaSummary {
+            return "\(snapshot.descriptor.displayName) 余额：\(quotaSummary)"
+        }
+        return "\(snapshot.descriptor.displayName) 未开放可独立验证的余额接口"
     }
 
     private var helpText: String {
@@ -4549,7 +4693,11 @@ struct LocalAIStatusView: View {
     }
 
     private var totalActiveCount: Int {
-        codexTasks.count + qwenTasks.count + kimiTasks.count
+        codexTasks.count
+            + qwenTasks.count
+            + kimiTasks.count
+            + discoveryStore.snapshots.compactMap(\.activeTaskCount)
+                .reduce(0, +)
     }
 
     var body: some View {

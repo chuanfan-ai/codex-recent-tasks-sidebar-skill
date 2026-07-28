@@ -30,6 +30,7 @@ private struct ThrowingAdapter: LocalAgentAdapter {
         displayName: "Synthetic Failure",
         applicationPaths: ["/Applications/Synthetic Failure.app"],
         bundleIdentifiers: ["test.synthetic.failure"],
+        brandMarkRelativePaths: [],
         supportLevel: .discovered,
         capabilities: .discoveryOnly,
         dataSourceDescription: "测试故障",
@@ -89,6 +90,9 @@ private struct AgentAdapterContractTests {
               workBuddy.descriptor.bundleIdentifiers == [
                   "com.workbuddy.workbuddy",
               ],
+              workBuddy.descriptor.brandMarkRelativePaths == [
+                  "Contents/Resources/app.asar.unpacked/cli/dist/web-ui/logo.svg",
+              ],
               workBuddy.descriptor.supportLevel == .partial,
               workBuddy.descriptor.capabilities.monitorsTasks,
               !workBuddy.descriptor.capabilities.monitorsQuota,
@@ -104,6 +108,9 @@ private struct AgentAdapterContractTests {
               ],
               traeWork.descriptor.bundleIdentifiers == [
                   "com.trae.solo.app",
+              ],
+              traeWork.descriptor.brandMarkRelativePaths == [
+                  "Contents/Resources/app/out/media/trae-logo.svg",
               ],
               !traeWork.descriptor.applicationPaths.contains(
                   "/Applications/TRAE.app"
@@ -302,11 +309,47 @@ private struct AgentAdapterContractTests {
         ] else {
             fail("WorkBuddy public session parsing")
         }
+        guard WorkBuddySessionListParser.threads(
+            from: Data("{}".utf8),
+            nowMillis: nowMillis
+        ) == nil else {
+            fail("WorkBuddy invalid session response")
+        }
+        guard WorkBuddySessionListParser.threads(
+            from: Data(
+                """
+                {"data":{"sessions":[]}}
+                """.utf8
+            ),
+            nowMillis: nowMillis
+        ) == [] else {
+            fail("WorkBuddy empty session response")
+        }
+
+        guard let unverifiedWorkBuddyVersion =
+            try? await WorkBuddyPublicSessionDataSource().load(
+                for: InstalledApplicationMetadata(
+                    path: "/Applications/WorkBuddy.app",
+                    bundleIdentifier: "com.workbuddy.workbuddy",
+                    displayName: "WorkBuddy",
+                    version: "5.4.0"
+                )
+            ) else {
+            fail("WorkBuddy version gate setup")
+        }
+        guard unverifiedWorkBuddyVersion.threads.isEmpty,
+              unverifiedWorkBuddyVersion.quotaSummary == nil,
+              unverifiedWorkBuddyVersion.availability == .unavailable(
+                  "当前 WorkBuddy 版本尚未通过只读会话适配验证"
+              ) else {
+            fail("WorkBuddy version gate")
+        }
 
         print(
             "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok "
-                + "workbuddy_public_sessions=ok trae_ide_excluded=ok "
-                + "isolation=ok presentation=ok"
+                + "workbuddy_public_sessions=ok invalid_response=ok "
+                + "trae_ide_excluded=ok version_gate=ok isolation=ok "
+                + "presentation=ok"
         )
     }
 

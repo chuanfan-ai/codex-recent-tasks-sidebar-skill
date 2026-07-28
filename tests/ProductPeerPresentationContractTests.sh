@@ -37,17 +37,19 @@ product_section="$(
   || fail "missing product name"
 [[ "$product_section" == *'.font(.system(size: 11, weight: .semibold))'* ]] \
   || fail "product name does not match agent heading typography"
-[[ "$product_section" == *'Text(presentation.statusText)'* ]] \
-  || fail "missing verified product status"
+[[ "$product_section" == *'snapshot.officialBrandMarkPath'* ]] \
+  || fail "official bundled product mark is not preferred"
+[[ "$product_section" == *'NSImage(contentsOfFile:'* ]] \
+  || fail "official bundled product mark is not loaded"
 [[ "$product_section" == *'NSWorkspace.shared.icon(forFile:'* ]] \
-  || fail "official installed application icon is not rendered"
+  || fail "installed application icon fallback is missing"
 [[ "$product_section" == *'Image(nsImage:'* ]] \
   || fail "product icon is still a generic symbol"
 [[ "$product_section" == *'snapshot.quotaSummary ?? "余额 —"'* ]] \
   || fail "missing product balance slot"
 [[ "$product_section" == *'ForEach(snapshot.threads)'* ]] \
   || fail "missing product thread list"
-[[ "$product_section" == *'Text("\(snapshot.activeTaskCount ?? 0)")'* ]] \
+[[ "$product_section" == *'Text(snapshot.activeTaskCount.map(String.init) ?? "—")'* ]] \
   || fail "missing active thread count"
 
 /usr/bin/grep -Fq 'ForEach(discoveryStore.snapshots)' "$SOURCE" \
