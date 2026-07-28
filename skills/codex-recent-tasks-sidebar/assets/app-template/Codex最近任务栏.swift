@@ -4390,7 +4390,7 @@ struct CompactAgentSectionView: View {
     }
 }
 
-struct DiscoveredProductRowView: View {
+struct DiscoveredProductSectionView: View {
     let snapshot: AgentProductSnapshot
     let openApplication: () -> Void
 
@@ -4400,35 +4400,34 @@ struct DiscoveredProductRowView: View {
         let presentation = snapshot.presentation
         Button(action: openApplication) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(healthTint)
-                    .frame(width: 5, height: 5)
+                Image(systemName: "app.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(productTint)
+                    .frame(width: 14)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(snapshot.descriptor.displayName)
-                        .font(.system(size: 9.8, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+                Text(snapshot.descriptor.displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(healthTint)
+                        .frame(width: 5, height: 5)
                     Text(presentation.statusText)
-                        .font(.system(size: 8.3))
+                        .font(.system(size: 8.8, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-
-                Spacer(minLength: 3)
-
-                Text("待适配")
-                    .font(.system(size: 8.2, weight: .semibold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.1), in: Capsule())
             }
             .padding(.horizontal, 8)
-            .frame(height: 31)
+            .frame(height: 30)
             .background(
                 isHovering && presentation.canOpenApplication
                     ? Color.primary.opacity(0.055) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
             )
             .contentShape(Rectangle())
         }
@@ -4445,6 +4444,10 @@ struct DiscoveredProductRowView: View {
                 ? "打开应用；当前不读取任务和额度"
                 : "当前未安装"
         )
+        .background(Color.primary.opacity(0.018))
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.35)
+        }
     }
 
     private var healthTint: Color {
@@ -4457,6 +4460,17 @@ struct DiscoveredProductRowView: View {
             return .secondary
         case .inspectionFailed:
             return .orange
+        }
+    }
+
+    private var productTint: Color {
+        switch snapshot.descriptor.id {
+        case "workbuddy":
+            return .teal
+        case "trae-work":
+            return .cyan
+        default:
+            return .accentColor
         }
     }
 
@@ -4476,54 +4490,6 @@ struct DiscoveredProductRowView: View {
             )
         }
         return details.joined(separator: "\n")
-    }
-}
-
-struct DiscoveredProductsSectionView: View {
-    let snapshots: [AgentProductSnapshot]
-    let openApplication: (String) -> Void
-
-    private var installedCount: Int {
-        snapshots.filter(\.isInstalled).count
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.orange)
-                    .frame(width: 14)
-                Text("首批 Cowork")
-                    .font(.system(size: 10.5, weight: .semibold))
-                Text("\(installedCount)/\(snapshots.count)")
-                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(Color.orange.opacity(0.1), in: Capsule())
-                Spacer()
-                Text("元数据模式")
-                    .font(.system(size: 8.3, weight: .medium))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 29)
-
-            VStack(spacing: 1) {
-                ForEach(snapshots) { snapshot in
-                    DiscoveredProductRowView(snapshot: snapshot) {
-                        openApplication(snapshot.id)
-                    }
-                }
-            }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
-        }
-        .background(Color.orange.opacity(0.018))
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.35)
-        }
     }
 }
 
@@ -4619,10 +4585,13 @@ struct LocalAIStatusView: View {
                         now: codexStore.now,
                         openTask: openKimiTask
                     )
-                    DiscoveredProductsSectionView(
-                        snapshots: discoveryStore.snapshots,
-                        openApplication: discoveryStore.openApplication
-                    )
+                    ForEach(discoveryStore.snapshots) { snapshot in
+                        DiscoveredProductSectionView(snapshot: snapshot) {
+                            discoveryStore.openApplication(
+                                productID: snapshot.id
+                            )
+                        }
+                    }
                 }
             }
             .scrollIndicators(.automatic)
