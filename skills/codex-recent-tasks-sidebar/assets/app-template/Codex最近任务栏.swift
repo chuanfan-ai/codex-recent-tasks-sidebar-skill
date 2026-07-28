@@ -3623,6 +3623,70 @@ final class KimiStore: ObservableObject {
     }
 }
 
+@MainActor
+final class AgentDiscoveryStore: ObservableObject {
+    @Published private(set) var snapshots: [AgentProductSnapshot] = []
+
+    private let registry: AgentAdapterRegistry
+    private let catalog: any ApplicationCatalog
+    private var refreshTimer: Timer?
+
+    init(
+        registry: AgentAdapterRegistry = .firstBatch,
+        catalog: any ApplicationCatalog = LocalApplicationCatalog(),
+        refreshInterval: TimeInterval? = 30
+    ) {
+        self.registry = registry
+        self.catalog = catalog
+        refresh()
+        if let refreshInterval {
+            refreshTimer = Timer.scheduledTimer(
+                withTimeInterval: refreshInterval,
+                repeats: true
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refresh()
+                }
+            }
+            refreshTimer?.tolerance = min(5, refreshInterval / 10)
+        }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
+    }
+
+    func refresh() {
+        let updatedSnapshots = registry.snapshots(using: catalog)
+        if snapshots != updatedSnapshots {
+            snapshots = updatedSnapshots
+        }
+    }
+
+    func openApplication(productID: String) {
+        guard let snapshot = snapshots.first(where: { $0.id == productID }),
+              snapshot.presentation.canOpenApplication,
+              let application = snapshot.application else {
+            return
+        }
+        if let runningApplication = NSRunningApplication.runningApplications(
+            withBundleIdentifier: application.bundleIdentifier
+        ).first {
+            runningApplication.activate(options: [.activateAllWindows])
+            return
+        }
+        NSWorkspace.shared.openApplication(
+            at: URL(fileURLWithPath: application.path),
+            configuration: NSWorkspace.OpenConfiguration()
+        )
+    }
+
+    func stop() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+}
+
 struct RecentTaskRowView: View {
     let projectName: String
     let task: CodexTask
@@ -4326,11 +4390,149 @@ struct CompactAgentSectionView: View {
     }
 }
 
+struct DiscoveredProductRowView: View {
+    let snapshot: AgentProductSnapshot
+    let openApplication: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        let presentation = snapshot.presentation
+        Button(action: openApplication) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(healthTint)
+                    .frame(width: 5, height: 5)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(snapshot.descriptor.displayName)
+                        .font(.system(size: 9.8, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(presentation.statusText)
+                        .font(.system(size: 8.3))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 3)
+
+                Text("待适配")
+                    .font(.system(size: 8.2, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.1), in: Capsule())
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 31)
+            .background(
+                isHovering && presentation.canOpenApplication
+                    ? Color.primary.opacity(0.055) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!presentation.canOpenApplication)
+        .onHover { isHovering = $0 }
+        .help(helpText)
+        .accessibilityLabel(
+            "\(snapshot.descriptor.displayName)，\(presentation.statusText)，"
+                + "\(presentation.supportText)"
+        )
+        .accessibilityHint(
+            presentation.canOpenApplication
+                ? "打开应用；当前不读取任务和额度"
+                : "当前未安装"
+        )
+    }
+
+    private var healthTint: Color {
+        switch snapshot.health {
+        case .running:
+            return .green
+        case .detected:
+            return .accentColor
+        case .notInstalled:
+            return .secondary
+        case .inspectionFailed:
+            return .orange
+        }
+    }
+
+    private var helpText: String {
+        let presentation = snapshot.presentation
+        var details = [
+            snapshot.descriptor.displayName,
+            "状态：\(presentation.statusText)",
+            "支持：\(presentation.supportText)",
+            presentation.detailText,
+            "数据来源：\(snapshot.descriptor.dataSourceDescription)",
+            "隐私：\(snapshot.descriptor.privacyDescription)",
+        ]
+        if let application = snapshot.application {
+            details.append(
+                "本机应用：\(application.displayName) \(application.version)"
+            )
+        }
+        return details.joined(separator: "\n")
+    }
+}
+
+struct DiscoveredProductsSectionView: View {
+    let snapshots: [AgentProductSnapshot]
+    let openApplication: (String) -> Void
+
+    private var installedCount: Int {
+        snapshots.filter(\.isInstalled).count
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 14)
+                Text("首批 Cowork")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text("\(installedCount)/\(snapshots.count)")
+                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.orange.opacity(0.1), in: Capsule())
+                Spacer()
+                Text("元数据模式")
+                    .font(.system(size: 8.3, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 29)
+
+            VStack(spacing: 1) {
+                ForEach(snapshots) { snapshot in
+                    DiscoveredProductRowView(snapshot: snapshot) {
+                        openApplication(snapshot.id)
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
+        }
+        .background(Color.orange.opacity(0.018))
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.35)
+        }
+    }
+}
+
 struct LocalAIStatusView: View {
     @ObservedObject var codexStore: TaskStore
     @ObservedObject var codexUsageStore: UsageStore
     @ObservedObject var qwenStore: QwenStore
     @ObservedObject var kimiStore: KimiStore
+    @ObservedObject var discoveryStore: AgentDiscoveryStore
     @ObservedObject var windowMode: WindowModeModel
 
     private var codexTasks: [ActivityRowModel] {
@@ -4417,6 +4619,10 @@ struct LocalAIStatusView: View {
                         now: codexStore.now,
                         openTask: openKimiTask
                     )
+                    DiscoveredProductsSectionView(
+                        snapshots: discoveryStore.snapshots,
+                        openApplication: discoveryStore.openApplication
+                    )
                 }
             }
             .scrollIndicators(.automatic)
@@ -4476,7 +4682,7 @@ struct LocalAIStatusView: View {
                 }
                 .buttonStyle(.plain)
                 .background(Color.primary.opacity(0.055), in: Circle())
-                .help("立即刷新三类 Agent")
+                .help("立即刷新全部 Agent 产品")
             }
             .contentShape(Rectangle())
             .gesture(headerDragGesture)
@@ -4706,6 +4912,7 @@ struct LocalAIStatusView: View {
         codexUsageStore.refresh()
         qwenStore.refresh()
         kimiStore.refresh()
+        discoveryStore.refresh()
     }
 
     private func openCodexTask(_ id: String) {
@@ -4736,6 +4943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let usageStore = UsageStore()
     private let qwenStore = QwenStore()
     private let kimiStore = KimiStore()
+    private let discoveryStore = AgentDiscoveryStore()
     private let windowMode = WindowModeModel()
     private var panel: NSPanel?
     private var statusItem: NSStatusItem?
@@ -4779,6 +4987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         usageStore.stop()
+        discoveryStore.stop()
     }
 
     private func createPanel() {
@@ -4817,6 +5026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 codexUsageStore: usageStore,
                 qwenStore: qwenStore,
                 kimiStore: kimiStore,
+                discoveryStore: discoveryStore,
                 windowMode: windowMode
             )
         )
@@ -4855,7 +5065,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.isFloatingPanel = true
             panel.level = .statusBar
             recordWindowLayerState("pinned")
-            updateWindowStatus("自由置顶 · 三类 Agent")
+            updateWindowStatus("自由置顶 · 本机 Agent")
             panel.orderFrontRegardless()
         }
     }
@@ -4995,7 +5205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "显示状态栏", action: #selector(showPanel), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "刷新三类 Agent", action: #selector(refreshTasks), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "刷新全部产品", action: #selector(refreshTasks), keyEquivalent: "r"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
@@ -5009,6 +5219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         usageStore.refresh()
         qwenStore.refresh()
         kimiStore.refresh()
+        discoveryStore.refresh()
         if windowMode.mode == .docked {
             dockToCodexWindow()
         }
@@ -5021,6 +5232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         usageStore.refresh()
         qwenStore.refresh()
         kimiStore.refresh()
+        discoveryStore.refresh()
         panel?.orderFrontRegardless()
     }
 

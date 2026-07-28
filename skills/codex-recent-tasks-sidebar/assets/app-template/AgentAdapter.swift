@@ -57,6 +57,13 @@ enum AgentProductHealth: Equatable, Sendable {
     case inspectionFailed
 }
 
+struct AgentProductPresentation: Equatable, Sendable {
+    let statusText: String
+    let supportText: String
+    let detailText: String
+    let canOpenApplication: Bool
+}
+
 struct AgentProductSnapshot: Identifiable, Equatable, Sendable {
     let descriptor: AgentProductDescriptor
     let application: InstalledApplicationMetadata?
@@ -68,6 +75,32 @@ struct AgentProductSnapshot: Identifiable, Equatable, Sendable {
     var id: String { descriptor.id }
     var isInstalled: Bool { application != nil }
     var isRunning: Bool { health == .running }
+    var presentation: AgentProductPresentation {
+        let statusText: String
+        let detailText: String
+        switch health {
+        case .notInstalled:
+            statusText = "未安装"
+            detailText = "未在已验证路径发现"
+        case .detected:
+            statusText = "已安装"
+            detailText = "仅识别应用元数据；任务与额度不读取"
+        case .running:
+            statusText = "运行中"
+            detailText = "仅识别应用元数据；任务与额度不读取"
+        case .inspectionFailed:
+            statusText = "检查失败"
+            detailText = diagnostic ?? "应用元数据检查失败"
+        }
+        return AgentProductPresentation(
+            statusText: statusText,
+            supportText: descriptor.supportLevel.displayName,
+            detailText: detailText,
+            canOpenApplication: isInstalled
+                && descriptor.capabilities.opensApplication
+                && health != .inspectionFailed
+        )
+    }
 
     static func inspectionFailed(
         descriptor: AgentProductDescriptor
