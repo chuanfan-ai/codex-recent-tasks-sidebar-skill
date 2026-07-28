@@ -101,6 +101,16 @@ private struct AgentAdapterContractTests {
               traeWorkSnapshot.quotaSummary == nil else {
             fail("metadata-only discovery")
         }
+        guard workBuddySnapshot.presentation == AgentProductPresentation(
+            statusText: "运行中",
+            supportText: "已发现 · 待适配",
+            detailText: "仅识别应用元数据；任务与额度不读取",
+            canOpenApplication: true
+        ),
+        traeWorkSnapshot.presentation.statusText == "运行中",
+        traeWorkSnapshot.presentation.canOpenApplication else {
+            fail("safe product presentation")
+        }
 
         let traeIDEOnlyCatalog = SyntheticApplicationCatalog(
             applicationsByPath: [
@@ -113,7 +123,17 @@ private struct AgentAdapterContractTests {
             ],
             runningBundleIdentifiers: ["com.trae.app"]
         )
-        guard !inspect(traeWork, catalog: traeIDEOnlyCatalog).isInstalled else {
+        let traeIDEOnlySnapshot = inspect(
+            traeWork,
+            catalog: traeIDEOnlyCatalog
+        )
+        guard !traeIDEOnlySnapshot.isInstalled,
+              traeIDEOnlySnapshot.presentation == AgentProductPresentation(
+                  statusText: "未安装",
+                  supportText: "已发现 · 待适配",
+                  detailText: "未在已验证路径发现",
+                  canOpenApplication: false
+              ) else {
             fail("TRAE IDE false positive")
         }
 
@@ -125,14 +145,21 @@ private struct AgentAdapterContractTests {
               snapshots[0].health == .inspectionFailed,
               snapshots[0].activeTaskCount == nil,
               snapshots[0].quotaSummary == nil,
+              snapshots[0].presentation.statusText == "检查失败",
+              !snapshots[0].presentation.canOpenApplication,
               snapshots[1] == workBuddySnapshot,
               snapshots[2] == traeWorkSnapshot else {
             fail("adapter failure isolation")
         }
+        guard AgentAdapterRegistry.firstBatch.adapters.map(
+            \.descriptor.id
+        ) == ["workbuddy", "trae-work"] else {
+            fail("first-batch order")
+        }
 
         print(
             "AGENT_ADAPTER_CONTRACT_OK products=2 metadata_only=ok "
-                + "trae_ide_excluded=ok isolation=ok"
+                + "trae_ide_excluded=ok isolation=ok presentation=ok"
         )
     }
 

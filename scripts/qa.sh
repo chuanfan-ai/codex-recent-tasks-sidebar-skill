@@ -69,7 +69,7 @@ mkdir -p "$FIXTURE_DIR"
   "$ADAPTER_CONTRACT_TEST" \
   -o "$FIXTURE_DIR/agent-adapter-contract-tests"
 adapter_contract_output="$("$FIXTURE_DIR/agent-adapter-contract-tests")"
-[[ "$adapter_contract_output" == "AGENT_ADAPTER_CONTRACT_OK products=2 metadata_only=ok trae_ide_excluded=ok isolation=ok" ]] || {
+[[ "$adapter_contract_output" == "AGENT_ADAPTER_CONTRACT_OK products=2 metadata_only=ok trae_ide_excluded=ok isolation=ok presentation=ok" ]] || {
   print -u2 "Agent 适配器契约自检失败：$adapter_contract_output"
   exit 23
 }
