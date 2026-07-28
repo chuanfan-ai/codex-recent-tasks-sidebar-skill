@@ -66,7 +66,7 @@
 
 2026-07-28 在 Apple Silicon Mac 上完成以下官方分发包核验：
 
-- WorkBuddy：官网更新通道版本 `5.3.5.34189228`，应用版本 `5.3.5`，应用名 `WorkBuddy.app`，Bundle ID `com.workbuddy.workbuddy`，Developer ID 团队 `FN2V63AD2J`，系统评估为已公证。
+- WorkBuddy：官网更新通道版本 `5.3.5.34189228`，应用版本 `5.3.5`，应用名 `WorkBuddy.app`，Bundle ID `com.workbuddy.workbuddy`，Developer ID 团队 `FN2V63AD2J`。官方 DMG 首次安装后通过严格签名与系统公证评估；首次启动后，应用在自身签名包内新增 `editor_sdk.log`，随后 `codesign --verify --deep --strict` 与 Gatekeeper 校验均因密封资源变化失败。未读取该日志，也未修改第三方应用包。
 - TRAE Work：中国区下载通道版本 `2.3.59354`，应用内部版本 `0.1.40`，macOS 应用仍命名为 `TRAE SOLO.app`，Bundle ID `com.trae.solo.app`，Developer ID 团队 `79M8227NKH`，系统评估为已公证。
 - 官方公开页面和只读应用包元数据检查尚未给出可验证的任务、额度或单任务跳转契约。2.1.0 不接入应用日志、用户数据库、DOM、调试端口或私有协议。
 
@@ -174,6 +174,7 @@
 - Kimi 活动判断依赖安全可确认的进程工作目录；无法确认时按无活动处理，避免把旧日志误报为运行中。
 - Kimi 尚不能精确跳到单个会话。
 - WorkBuddy 与 TRAE Work 尚无经过验证的公开任务、额度或精确任务跳转契约。
+- WorkBuddy 5.3.5 首次启动后会改变自身已签名应用包，导致严格签名与 Gatekeeper 复验失败。这是已复现的上游完整性阻断项；在官方修复包或可验证说明出现前，暂停 WorkBuddy 的外部安装灰测。
 - 既有三款 Agent 的主要状态聚合与展示仍集中在主 Swift 文件中，不适合直接扩展到大量深度适配产品。
 
 ## 8. 产品化推进路线

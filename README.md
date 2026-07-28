@@ -105,11 +105,12 @@ open "build/本机AI状态栏.app"
 - Kimi 的 Code 限额依赖已安装且已登录的 Kimi CLI，总量依赖 Kimi 桌面端已经刷新过本机订阅日志；任一上游格式变化都可能让对应行暂时缺失。活动判断还依赖本机 Kimi 进程的工作目录；无法安全确认进程时会按无活动处理，避免把旧日志误报为运行中。首次启用会创建一个专用本地监控会话，不会自动删除历史诊断会话。
 - Kimi 当前只能打开 Agent 首页，不能精确定位到某个会话。
 - WorkBuddy 与 TRAE Work 仅完成安装/运行元数据发现和安全打开应用。官方公开资料与应用包检查尚未提供可验证的任务、额度或精确任务跳转契约，因此保持“已发现 · 待适配”。
+- WorkBuddy 5.3.5 的官方 DMG 初装时通过签名与公证评估，但首次启动后会在自身签名包内新增日志文件，导致严格签名与 Gatekeeper 复验失败。项目未读取日志内容、未修改第三方应用；官方修复或说明出现前，WorkBuddy 外部安装灰测暂停。
 - 日常构建仍采用 ad-hoc 签名。`build/distribution/2.1.0-build8/` 已生成独立 Developer ID 签名候选包，但尚未完成 Apple 公证，Gatekeeper 会按“Unnotarized Developer ID”拒绝；该候选包不得外发。
 
 ## 外部灰测
 
-首批外部灰测以 WorkBuddy 与 TRAE Work 为重点，执行批次、测试矩阵、隐私停线条件和放量门槛见 [首批外部灰测计划](docs/FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md)。在 Developer ID 签名与 Apple 公证完成前，不向外部用户分发安装包。
+首批外部灰测仍以 WorkBuddy 与 TRAE Work 为重点，执行批次、测试矩阵、隐私停线条件和放量门槛见 [首批外部灰测计划](docs/FIRST_EXTERNAL_GRAY_PLAN.zh-CN.md)。当前可先推进 TRAE Work；WorkBuddy 等待上游完整性问题解除。在本项目安装包完成 Developer ID 签名与 Apple 公证前，不向外部用户分发。
 
 ## License
 
