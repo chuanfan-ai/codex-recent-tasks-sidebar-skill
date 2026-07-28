@@ -5335,8 +5335,8 @@ enum SelfTest {
                 isStale: false
             ) == [
                 CompactQuotaLine(label: "总量", value: "余 22%"),
-                CompactQuotaLine(label: "5h", value: "余 60%"),
-                CompactQuotaLine(label: "7天", value: "余 10%"),
+                CompactQuotaLine(label: "Code 5h", value: "余 60%"),
+                CompactQuotaLine(label: "Code 7天", value: "余 10%"),
             ] else {
                 fputs("SELF_TEST_FAILED Kimi quota line layout\n", stderr)
                 return 34
