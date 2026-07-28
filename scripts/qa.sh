@@ -460,6 +460,14 @@ if /usr/bin/grep -R -n -E \
   exit 6
 fi
 
+synthetic_ui_output="$(
+  "$ROOT/scripts/launch_synthetic_ui_qa.sh" --prepare-only
+)"
+[[ "$synthetic_ui_output" == "SYNTHETIC_UI_QA_READY app=$BUILD_DIR/ui-qa/本机AI状态栏 QA.app" ]] || {
+  print -u2 "合成数据桌面验收副本准备失败：$synthetic_ui_output"
+  exit 24
+}
+
 print "$self_test_output"
 print "$usage_test_output"
 print "$usage_resilience_output"
