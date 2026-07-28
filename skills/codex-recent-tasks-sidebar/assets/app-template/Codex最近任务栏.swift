@@ -843,7 +843,7 @@ enum KimiProcessInspector {
     }
 }
 
-struct KimiTaskRepository {
+private struct KimiCLITaskRepository {
     private struct Candidate {
         let task: LocalAgentTask
         let canonicalWorkDirectory: String
@@ -1029,6 +1029,229 @@ struct KimiTaskRepository {
         guard let rawValue else { return nil }
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+private struct KimiWorkTaskRepository {
+    private static let maximumStatusSize = 512 * 1_024
+    private static let maximumTitleSize = 1_024 * 1_024
+
+    static func loadActiveTasks() throws -> (
+        sourceURL: URL,
+        tasks: [LocalAgentTask]
+    ) {
+        let directoryURL = try currentStatusDirectoryURL()
+        let statusURL = directoryURL.appendingPathComponent(
+            "conversation-statuses.json",
+            isDirectory: false
+        )
+        let unreadURL = directoryURL.appendingPathComponent(
+            "conversation-unread.json",
+            isDirectory: false
+        )
+        let titleURL = directoryURL.appendingPathComponent(
+            "conversation-titles.json",
+            isDirectory: false
+        )
+        let statusData = try readOptionalFile(
+            at: statusURL,
+            maximumSize: maximumStatusSize
+        )
+        let unreadData = try readOptionalFile(
+            at: unreadURL,
+            maximumSize: maximumStatusSize
+        )
+        let titleData = try readOptionalFile(
+            at: titleURL,
+            maximumSize: maximumTitleSize
+        )
+        guard let records = KimiWorkStatusParser.activeRecords(
+            statusData: statusData,
+            unreadData: unreadData,
+            titleData: titleData
+        ) else {
+            throw TaskRepositoryError.invalidData(
+                "Kimi Work 本机任务状态不可读"
+            )
+        }
+
+        let sourceURLs = [
+            statusData == nil ? nil : statusURL,
+            unreadData == nil ? nil : unreadURL,
+        ].compactMap { $0 }
+        guard let sourceURL = sourceURLs.first else {
+            throw TaskRepositoryError.databaseNotFound
+        }
+        let updatedMillis = sourceURLs.map(modificationMillis)
+            .max() ?? 0
+        let tasks = records.map { record in
+            LocalAgentTask(
+                id: "kimi-work:\(record.conversationKey)",
+                agent: .kimi,
+                title: record.title ?? fallbackTitle(for: record.state),
+                projectName: "Kimi Work",
+                projectPath: "kimi-work://home",
+                updatedMillis: updatedMillis,
+                displayState: displayState(for: record.state),
+                navigationID: record.conversationKey
+            )
+        }
+        return (sourceURL, tasks)
+    }
+
+    private static func currentStatusDirectoryURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let fileManager = FileManager.default
+        let directoryURL: URL
+        if let override = environment[
+            "KIMI_WORK_STATUS_DIRECTORY_OVERRIDE"
+        ], !override.isEmpty {
+            directoryURL = URL(
+                fileURLWithPath: override,
+                isDirectory: true
+            )
+        } else {
+            let applicationSupportURL = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: false
+            )
+            directoryURL = applicationSupportURL
+                .appendingPathComponent(
+                    "kimi-desktop",
+                    isDirectory: true
+                )
+                .appendingPathComponent(
+                    "kimi-agent",
+                    isDirectory: true
+                )
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(
+            atPath: directoryURL.path,
+            isDirectory: &isDirectory
+        ),
+        isDirectory.boolValue else {
+            throw TaskRepositoryError.databaseNotFound
+        }
+        return directoryURL
+    }
+
+    private static func readOptionalFile(
+        at url: URL,
+        maximumSize: Int
+    ) throws -> Data? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else {
+            return nil
+        }
+        guard let attributes = try? fileManager.attributesOfItem(
+            atPath: url.path
+        ),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        let fileSize = attributes[.size] as? NSNumber,
+        fileSize.intValue <= maximumSize,
+        let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            throw TaskRepositoryError.invalidData(
+                "Kimi Work 本机任务状态不可读"
+            )
+        }
+        return data
+    }
+
+    private static func modificationMillis(_ url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        )
+        let date = attributes?[.modificationDate] as? Date ?? .distantPast
+        return Int64(date.timeIntervalSince1970 * 1_000)
+    }
+
+    private static func displayState(
+        for state: KimiWorkActivityState
+    ) -> TaskDisplayState {
+        switch state {
+        case .running:
+            return .running
+        case .needsAction:
+            return .needsAction
+        case .needsReview:
+            return .needsReview
+        }
+    }
+
+    private static func fallbackTitle(
+        for state: KimiWorkActivityState
+    ) -> String {
+        switch state {
+        case .running:
+            return "Kimi Work 运行中"
+        case .needsAction:
+            return "Kimi Work 待操作"
+        case .needsReview:
+            return "Kimi Work 待查看"
+        }
+    }
+}
+
+struct KimiTaskRepository {
+    static func loadActiveTasks() throws -> (
+        indexURL: URL,
+        tasks: [LocalAgentTask]
+    ) {
+        var sourceURLs: [URL] = []
+        var tasks: [LocalAgentTask] = []
+        var firstError: Error?
+
+        do {
+            let loaded = try KimiCLITaskRepository.loadActiveTasks()
+            sourceURLs.append(loaded.indexURL)
+            tasks.append(contentsOf: loaded.tasks)
+        } catch {
+            firstError = error
+        }
+        do {
+            let loaded = try KimiWorkTaskRepository.loadActiveTasks()
+            sourceURLs.insert(loaded.sourceURL, at: 0)
+            tasks.append(contentsOf: loaded.tasks)
+        } catch {
+            if firstError == nil {
+                firstError = error
+            }
+        }
+
+        guard let indexURL = sourceURLs.first else {
+            throw firstError ?? TaskRepositoryError.databaseNotFound
+        }
+        var seenIDs = Set<String>()
+        let mergedTasks = tasks.filter {
+            seenIDs.insert($0.id).inserted
+        }.sorted {
+            let leftPriority = priority($0.displayState)
+            let rightPriority = priority($1.displayState)
+            if leftPriority != rightPriority {
+                return leftPriority < rightPriority
+            }
+            if $0.updatedMillis != $1.updatedMillis {
+                return $0.updatedMillis > $1.updatedMillis
+            }
+            return $0.id < $1.id
+        }
+        return (indexURL, mergedTasks)
+    }
+
+    private static func priority(_ state: TaskDisplayState) -> Int {
+        switch state {
+        case .needsAction:
+            return 0
+        case .running:
+            return 1
+        case .needsReview:
+            return 2
+        case .idle:
+            return 3
+        }
     }
 }
 
