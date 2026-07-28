@@ -1,7 +1,7 @@
 # 本机AI状态栏：产品交接与推进基线
 
 更新日期：2026-07-28  
-当前版本：2.1.0（Build 8）
+当前版本：2.1.0（Build 9）
 当前开发分支：`feat/local-ai-statusbar`
 
 ## 1. 产品入口
@@ -28,7 +28,7 @@
 
 “本机AI状态栏”是一款常驻桌面的原生 macOS 小工具，让用户在不频繁切换窗口的情况下，持续看到本机 AI Agent 的活动线程、待查看状态和剩余额度。
 
-已稳定使用的主体能力服务于同时使用 Codex、QwenWorkCN 和 Kimi 的个人用户。2.1.0 开始把固定三款产品扩展为可发现、可解释的本机 Agent 监控平台，首批 Cowork 产品为 WorkBuddy 与 TRAE Work。
+已稳定使用的主体能力服务于同时使用 Codex、QwenWorkCN 和 Kimi 的个人用户。2.1.0 开始把固定三款产品扩展为可发现、可解释的本机 Agent 监控平台，并新增 WorkBuddy 与 TRAE Work。
 
 产品不做任务管理，不替用户执行、终止或归档任务，也不读取任务正文。它只提供状态观察和安全跳转。
 
@@ -49,8 +49,8 @@
 - 已完成且没有待查看更新的历史线程不显示。
 - 按真实项目分组，显示各产品保存的中文项目名和中文线程名。
 - 新增统一 `LocalAgentAdapter` 契约，定义产品描述、支持等级、能力、应用元数据、健康状态与故障隔离。
-- 新增“首批 Cowork”分区，准确识别 WorkBuddy 与 TRAE Work 的安装和运行状态。
-- WorkBuddy 与 TRAE Work 均为“已发现 · 待适配”：任务数和额度在数据模型中保持空值，不用进程数、旧缓存或猜测填充。
+- WorkBuddy 与 TRAE Work 分别作为独立产品栏展示，产品名称与 Codex、QwenWorkCN、Kimi 使用相同字号和字重。
+- 两款产品只显示已验证的安装或运行状态；任务数和额度在数据模型中保持空值，不用进程数、旧缓存或猜测填充。
 
 ### 支持矩阵
 
@@ -62,7 +62,7 @@
 | WorkBuddy | 已发现但未支持 | 否 | 否 | 打开应用 | 应用路径、Bundle ID、版本和运行状态 |
 | TRAE Work | 已发现但未支持 | 否 | 否 | 打开应用 | 应用路径、Bundle ID、版本和运行状态 |
 
-### 首批 Cowork 本机事实
+### WorkBuddy 与 TRAE Work 本机事实
 
 2026-07-28 在 Apple Silicon Mac 上完成以下官方分发包核验：
 
@@ -125,7 +125,7 @@
         └── AppIcon.icns             App 图标
 ```
 
-统一适配器模型与首批 Cowork 发现逻辑已从主文件拆到 `AgentAdapter.swift`。Codex、QwenWorkCN、Kimi 的既有状态聚合和主要 SwiftUI 展示仍集中在主文件；继续增加可读任务的适配器前，应再拆出状态聚合层、窗口层和视图层。
+统一适配器模型与 WorkBuddy/TRAE Work 发现逻辑已从主文件拆到 `AgentAdapter.swift`。Codex、QwenWorkCN、Kimi 的既有状态聚合和主要 SwiftUI 展示仍集中在主文件；继续增加可读任务的适配器前，应再拆出状态聚合层、窗口层和视图层。
 
 ## 6. 质量基线
 
@@ -143,6 +143,7 @@
 - 活动线程、待查看、项目分组和中文名称
 - 三类额度解析、故障恢复和窄栏文案
 - WorkBuddy 与 TRAE Work 的精确 Bundle 匹配、TRAE IDE 排除、元数据最小化和适配器故障隔离
+- WorkBuddy 与 TRAE Work 的平级产品标题，以及界面不出现分组说明、模式说明或“待适配”徽标
 - 独立 Bundle ID 的合成桌面验收副本，阻止布局工具接触真实任务标题
 - 输入文件只读哈希比对
 - 自检和脱敏扫描
@@ -159,7 +160,7 @@
 - 跟随 Codex 前后台和单独置顶正确
 - Codex、QwenWorkCN 点击后精确跳转
 - Kimi 只承诺打开 Agent 首页
-- WorkBuddy 与 TRAE Work 只显示安装、运行和支持等级；点击只打开对应应用
+- WorkBuddy 与 TRAE Work 以平级产品栏显示安装或运行状态；点击只打开对应应用
 
 桌面布局与可访问性检查必须在合成副本中完成。真实应用只允许做不回传标题或 ID 的运行状态检查。
 

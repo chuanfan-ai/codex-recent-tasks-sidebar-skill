@@ -1,6 +1,6 @@
 ---
 name: codex-recent-tasks-sidebar
-description: Build, customize, validate, or repair the native macOS 本机AI状态栏. Use for the 240-point always-on-top utility that monitors supported Codex, QwenWorkCN, and Kimi state and safely discovers first-batch Cowork products without exposing task content or credentials.
+description: Build, customize, validate, or repair the native macOS 本机AI状态栏. Use for the 240-point always-on-top utility that monitors supported Codex, QwenWorkCN, and Kimi state and safely discovers WorkBuddy and TRAE Work without exposing task content or credentials.
 ---
 
 # 本机AI状态栏
@@ -25,7 +25,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
    - Codex opens the exact `codex://threads/{id}` target;
    - QwenWorkCN opens the exact local Chat ID through its desktop bridge;
    - Kimi opens the Agent page, with exact-session navigation reported as unavailable until a verifiable upstream route exists;
-   - WorkBuddy and TRAE Work show only verified installation/running metadata and the `已发现 · 待适配` level;
+   - WorkBuddy and TRAE Work appear as peer product sections with the same product-name typography as Codex, QwenWorkCN, and Kimi, while showing only verified installation/running state;
    - quota failures degrade to a visible unavailable/stale state without blocking task monitoring.
 
 ## Data adapters
@@ -75,7 +75,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Render Kimi quota as three compact rows ordered `总量`, `Code 5h`, `Code 7天`, with values formatted as `余 n%`. If the desktop aggregate is unavailable, keep the verified Code rows instead of inventing a total.
 - Keep available Kimi quota values in the neutral secondary text color regardless of the remaining percentage. Reserve the warning color for stale or unavailable quota data.
 - Group active threads by real project name. Do not substitute English demo labels in live UI.
-- Keep WorkBuddy and TRAE Work in a separate `首批 Cowork` section with visible support level and `元数据模式`.
+- Render WorkBuddy and TRAE Work as separate peer product sections after Kimi. Match the existing product-name font size and weight; do not add a group heading, mode label, or visible `待适配` badge.
 - Always-on-top is the invariant. Docked versus pinned changes position, not layer.
 - Docking aligns bottom edges, not top edges.
 
