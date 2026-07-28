@@ -5163,13 +5163,15 @@ enum SelfTest {
             }
             guard CompactQuotaLineFormatter.expanded(
                 windows: [
+                    UsageWindowDisplay(label: "总量", remainingPercent: 22),
                     UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
                     UsageWindowDisplay(label: "每周", remainingPercent: 10),
                 ],
                 isStale: false
             ) == [
-                CompactQuotaLine(label: "5 小时", value: "剩余 60%"),
-                CompactQuotaLine(label: "每周", value: "剩余 10%"),
+                CompactQuotaLine(label: "总量", value: "余 22%"),
+                CompactQuotaLine(label: "5h", value: "余 60%"),
+                CompactQuotaLine(label: "7天", value: "余 10%"),
             ] else {
                 fputs("SELF_TEST_FAILED Kimi quota line layout\n", stderr)
                 return 34
@@ -5505,13 +5507,14 @@ enum KimiUsageSelfTest {
         case let .success(windows):
             if expectFixtureValues {
                 guard windows == [
+                    UsageWindowDisplay(label: "总量", remainingPercent: 22),
                     UsageWindowDisplay(label: "5 小时", remainingPercent: 60),
                     UsageWindowDisplay(label: "每周", remainingPercent: 10),
                 ] else {
                     fputs("KIMI_USAGE_SELF_TEST_FAILED unexpected values\n", stderr)
                     return 51
                 }
-                print("KIMI_USAGE_SELF_TEST_OK windows=2")
+                print("KIMI_USAGE_SELF_TEST_OK windows=3")
             } else {
                 print("KIMI_USAGE_PROBE_OK windows=\(windows.count)")
             }

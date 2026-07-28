@@ -22,6 +22,7 @@ FIXTURE_KIMI_IDLE_DIR="$FIXTURE_DIR/kimi-idle"
 FIXTURE_KIMI_STALE_DIR="$FIXTURE_DIR/kimi-stale"
 FIXTURE_KIMI_MONITOR_DIR="$FIXTURE_DIR/kimi-monitor"
 FIXTURE_KIMI_USAGE="$FIXTURE_DIR/kimi-usage.txt"
+FIXTURE_KIMI_TOTAL_USAGE_LOG="$FIXTURE_DIR/kimi-main.log"
 
 if /usr/bin/grep -q "getPendingCompletions" "$SOURCE"; then
   print -u2 "QwenWorkCN 待查看读取回归为会消费状态的接口"
@@ -217,6 +218,11 @@ Plan usage
   Weekly   [##################--]  90% used
 TEXT
 
+cat > "$FIXTURE_KIMI_TOTAL_USAGE_LOG" <<'TEXT'
+[2099-12-31 23:00:00] [info] [SubscriptionManager] refreshed(sub): level=3 isMember=true omniRatio=0.2500 exhausted=false resetAt=2100-01-20T00:00:00Z
+[2100-01-01 00:00:00] [info] [SubscriptionManager] refreshed(sub): level=3 isMember=true omniRatio=0.7832 exhausted=false resetAt=2100-02-20T00:00:00Z
+TEXT
+
 cat > "$FIXTURE_USAGE_SERVER" <<'ZSH'
 #!/bin/zsh
 request_count=0
@@ -261,6 +267,7 @@ before_kimi_running_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_RUNNING_DIR/agents/ma
 before_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl")"
 before_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 before_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
+before_kimi_total_usage_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_TOTAL_USAGE_LOG")"
 self_test_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
   CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
@@ -325,9 +332,11 @@ qwen_bridge_output="$(
 
 kimi_usage_output="$(
   KIMI_USAGE_TEXT_OVERRIDE="$FIXTURE_KIMI_USAGE" \
+  KIMI_TOTAL_USAGE_LOG_OVERRIDE="$FIXTURE_KIMI_TOTAL_USAGE_LOG" \
   "$BINARY" --kimi-usage-self-test
 )"
-[[ "$kimi_usage_output" == "KIMI_USAGE_SELF_TEST_OK windows=2" ]] || {
+after_kimi_total_usage_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_TOTAL_USAGE_LOG")"
+[[ "$kimi_usage_output" == "KIMI_USAGE_SELF_TEST_OK windows=3" ]] || {
   print -u2 "Kimi 官方额度输出自检失败：$kimi_usage_output"
   exit 18
 }
@@ -388,7 +397,8 @@ set -e
    && "$before_kimi_running_hash" == "$after_kimi_running_hash" \
    && "$before_kimi_idle_hash" == "$after_kimi_idle_hash" \
    && "$before_kimi_stale_hash" == "$after_kimi_stale_hash" \
-   && "$before_kimi_monitor_hash" == "$after_kimi_monitor_hash" ]] || {
+   && "$before_kimi_monitor_hash" == "$after_kimi_monitor_hash" \
+   && "$before_kimi_total_usage_hash" == "$after_kimi_total_usage_hash" ]] || {
   print -u2 "自检修改了固定 Kimi 测试会话"
   exit 16
 }
