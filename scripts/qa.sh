@@ -298,7 +298,7 @@ after_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire
 after_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 after_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }

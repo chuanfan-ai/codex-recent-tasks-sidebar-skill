@@ -5287,6 +5287,24 @@ enum SelfTest {
                 fputs("SELF_TEST_FAILED Kimi quota line layout\n", stderr)
                 return 34
             }
+            guard QuotaTintPolicy.role(
+                remainingPercent: 0,
+                isStale: false,
+                emphasizesLowBalance: false
+            ) == .neutral,
+            QuotaTintPolicy.role(
+                remainingPercent: 0,
+                isStale: true,
+                emphasizesLowBalance: false
+            ) == .warning,
+            QuotaTintPolicy.role(
+                remainingPercent: 10,
+                isStale: false,
+                emphasizesLowBalance: true
+            ) == .critical else {
+                fputs("SELF_TEST_FAILED Kimi quota tint policy\n", stderr)
+                return 35
+            }
 
             let sanitizedEnvironment = KimiProcessEnvironment.sanitized([
                 "HOME": "/tmp/synthetic-home",
@@ -5395,7 +5413,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
