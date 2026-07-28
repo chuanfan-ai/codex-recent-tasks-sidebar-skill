@@ -27,6 +27,8 @@ required_fixture_paths=(
   "$FIXTURE_DIR/qwen-desktop-snapshot.json"
   "$FIXTURE_DIR/kimi-session-index.jsonl"
   "$FIXTURE_DIR/kimi-monitor"
+  "$FIXTURE_DIR/kimi-work/conversation-statuses.json"
+  "$FIXTURE_DIR/kimi-work/conversation-unread.json"
   "$FIXTURE_DIR/kimi-usage.txt"
   "$FIXTURE_DIR/kimi-main.log"
 )
@@ -86,6 +88,7 @@ fi
   --env "KIMI_MONITOR_DIRECTORY_OVERRIDE=$FIXTURE_DIR/kimi-monitor" \
   --env "KIMI_MONITOR_SESSION_ID_OVERRIDE=kimi-monitor" \
   --env "KIMI_ACTIVE_WORK_DIRS_OVERRIDE=/tmp/Kimi中文项目" \
+  --env "KIMI_WORK_STATUS_DIRECTORY_OVERRIDE=$FIXTURE_DIR/kimi-work" \
   --env "KIMI_USAGE_TEXT_OVERRIDE=$FIXTURE_DIR/kimi-usage.txt" \
   --env "KIMI_TOTAL_USAGE_LOG_OVERRIDE=$FIXTURE_DIR/kimi-main.log" \
   --env "LOCAL_AI_STATUSBAR_SYNTHETIC_AGENT_PRODUCTS=1" \

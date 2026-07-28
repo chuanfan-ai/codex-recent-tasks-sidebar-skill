@@ -5763,11 +5763,35 @@ enum SelfTest {
             }
 
             let kimiTasks = try KimiTaskRepository.loadActiveTasks().tasks
-            guard kimiTasks.count == 1,
-                  kimiTasks.first?.id == "kimi-running",
-                  kimiTasks.first?.title == "Kimi 中文运行线程",
-                  kimiTasks.first?.projectName == "Kimi中文项目",
-                  kimiTasks.first?.displayState == .running else {
+            guard kimiTasks.count == 4,
+                  kimiTasks.contains(where: {
+                      $0.id == "kimi-running"
+                          && $0.title == "Kimi 中文运行线程"
+                          && $0.projectName == "Kimi中文项目"
+                          && $0.displayState == .running
+                  }),
+                  kimiTasks.contains(where: {
+                      $0.id == "kimi-work:synthetic-work-running"
+                          && $0.title == "Kimi Work 中文运行线程"
+                          && $0.projectName == "Kimi Work"
+                          && $0.displayState == .running
+                  }),
+                  kimiTasks.contains(where: {
+                      $0.id == "kimi-work:synthetic-work-blocked"
+                          && $0.title == "Kimi Work 中文待处理线程"
+                          && $0.projectName == "Kimi Work"
+                          && $0.displayState == .needsAction
+                  }),
+                  kimiTasks.contains(where: {
+                      $0.id
+                          == "kimi-work:synthetic-work-completed-unread"
+                          && $0.title == "Kimi Work 待查看"
+                          && $0.projectName == "Kimi Work"
+                          && $0.displayState == .needsReview
+                  }),
+                  !kimiTasks.contains(where: {
+                      $0.id == "kimi-work:synthetic-work-completed-read"
+                  }) else {
                 fputs("SELF_TEST_FAILED Kimi active task repository\n", stderr)
                 return 31
             }
@@ -5796,7 +5820,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok kimi_work_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)

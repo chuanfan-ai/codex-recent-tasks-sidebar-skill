@@ -24,6 +24,7 @@ FIXTURE_KIMI_RUNNING_DIR="$FIXTURE_DIR/kimi-running"
 FIXTURE_KIMI_IDLE_DIR="$FIXTURE_DIR/kimi-idle"
 FIXTURE_KIMI_STALE_DIR="$FIXTURE_DIR/kimi-stale"
 FIXTURE_KIMI_MONITOR_DIR="$FIXTURE_DIR/kimi-monitor"
+FIXTURE_KIMI_WORK_DIR="$FIXTURE_DIR/kimi-work"
 FIXTURE_KIMI_USAGE="$FIXTURE_DIR/kimi-usage.txt"
 FIXTURE_KIMI_TOTAL_USAGE_LOG="$FIXTURE_DIR/kimi-main.log"
 
@@ -197,7 +198,8 @@ mkdir -p \
   "$FIXTURE_KIMI_RUNNING_DIR/agents/main" \
   "$FIXTURE_KIMI_IDLE_DIR/agents/main" \
   "$FIXTURE_KIMI_STALE_DIR/agents/main" \
-  "$FIXTURE_KIMI_MONITOR_DIR/agents/main"
+  "$FIXTURE_KIMI_MONITOR_DIR/agents/main" \
+  "$FIXTURE_KIMI_WORK_DIR"
 
 cat > "$FIXTURE_KIMI_INDEX" <<JSONL
 {"sessionId":"kimi-running","sessionDir":"$FIXTURE_KIMI_RUNNING_DIR","workDir":"/tmp/Kimi中文项目"}
@@ -232,6 +234,27 @@ JSONL
 cat > "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl" <<'JSONL'
 {"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-monitor-step"}}
 JSONL
+
+cat > "$FIXTURE_KIMI_WORK_DIR/conversation-statuses.json" <<'JSON'
+{
+  "synthetic-work-running": "running",
+  "synthetic-work-blocked": "blocked",
+  "synthetic-work-completed-unread": "completed",
+  "synthetic-work-completed-read": "completed"
+}
+JSON
+cat > "$FIXTURE_KIMI_WORK_DIR/conversation-unread.json" <<'JSON'
+[
+  "synthetic-work-completed-unread"
+]
+JSON
+cat > "$FIXTURE_KIMI_WORK_DIR/conversation-titles.json" <<'JSON'
+{
+  "synthetic-work-running": "Kimi Work 中文运行线程",
+  "synthetic-work-blocked": "Kimi Work 中文待处理线程",
+  "synthetic-work-completed-read": "不应显示的 Work 已读线程"
+}
+JSON
 
 cat > "$FIXTURE_KIMI_USAGE" <<'TEXT'
 Plan usage
@@ -288,6 +311,9 @@ before_kimi_running_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_RUNNING_DIR/agents/ma
 before_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl")"
 before_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 before_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
+before_kimi_work_status_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-statuses.json")"
+before_kimi_work_unread_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-unread.json")"
+before_kimi_work_title_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-titles.json")"
 before_kimi_total_usage_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_TOTAL_USAGE_LOG")"
 self_test_output="$(
   CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
@@ -305,6 +331,7 @@ self_test_output="$(
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
   KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
+  KIMI_WORK_STATUS_DIRECTORY_OVERRIDE="$FIXTURE_KIMI_WORK_DIR" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
@@ -318,8 +345,11 @@ after_kimi_running_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_RUNNING_DIR/agents/mai
 after_kimi_idle_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl")"
 after_kimi_stale_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_STALE_DIR/agents/main/wire.jsonl")"
 after_kimi_monitor_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl")"
+after_kimi_work_status_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-statuses.json")"
+after_kimi_work_unread_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-unread.json")"
+after_kimi_work_title_hash="$(/usr/bin/shasum "$FIXTURE_KIMI_WORK_DIR/conversation-titles.json")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok kimi_quota_lines=ok kimi_quota_tint=ok kimi_environment=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok kimi_work_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
@@ -372,9 +402,10 @@ activity_probe_output="$(
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
   KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
+  KIMI_WORK_STATUS_DIRECTORY_OVERRIDE="$FIXTURE_KIMI_WORK_DIR" \
   "$BINARY" --activity-probe
 )"
-[[ "$activity_probe_output" == "ACTIVITY_PROBE_OK codex=2 qwen=2 kimi=1" ]] || {
+[[ "$activity_probe_output" == "ACTIVITY_PROBE_OK codex=2 qwen=2 kimi=4" ]] || {
   print -u2 "三类 Agent 活动探测自检失败：$activity_probe_output"
   exit 20
 }
@@ -419,6 +450,9 @@ set -e
    && "$before_kimi_idle_hash" == "$after_kimi_idle_hash" \
    && "$before_kimi_stale_hash" == "$after_kimi_stale_hash" \
    && "$before_kimi_monitor_hash" == "$after_kimi_monitor_hash" \
+   && "$before_kimi_work_status_hash" == "$after_kimi_work_status_hash" \
+   && "$before_kimi_work_unread_hash" == "$after_kimi_work_unread_hash" \
+   && "$before_kimi_work_title_hash" == "$after_kimi_work_title_hash" \
    && "$before_kimi_total_usage_hash" == "$after_kimi_total_usage_hash" ]] || {
   print -u2 "自检修改了固定 Kimi 测试会话"
   exit 16
@@ -434,6 +468,7 @@ fallback_output="$(
   KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
   KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
   KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
+  KIMI_WORK_STATUS_DIRECTORY_OVERRIDE="$FIXTURE_KIMI_WORK_DIR" \
   "$BINARY" --self-test
 )"
 [[ "$fallback_output" == *"SELF_TEST_OK count=3"* ]] || {
