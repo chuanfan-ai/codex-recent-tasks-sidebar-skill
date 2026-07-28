@@ -2902,6 +2902,45 @@ enum SelfTest {
                 return 27
             }
 
+            let qwenTasks = try QwenTaskRepository.loadActiveTasks().tasks
+            guard qwenTasks.count == 2,
+                  qwenTasks.contains(where: {
+                      $0.id == "qwen-sub-running"
+                          && $0.title == "千问运行线程"
+                          && $0.projectName == "千问中文项目"
+                          && $0.displayState == .running
+                  }),
+                  qwenTasks.contains(where: {
+                      $0.id == "qwen-sub-review"
+                          && $0.title == "千问待查看线程"
+                          && $0.projectName == "千问中文项目"
+                          && $0.displayState == .needsReview
+                  }),
+                  !qwenTasks.contains(where: { $0.id == "qwen-sub-idle" }) else {
+                fputs("SELF_TEST_FAILED Qwen active task repository\n", stderr)
+                return 30
+            }
+
+            let kimiTasks = try KimiTaskRepository.loadActiveTasks().tasks
+            guard kimiTasks.count == 1,
+                  kimiTasks.first?.id == "kimi-running",
+                  kimiTasks.first?.title == "Kimi 中文运行线程",
+                  kimiTasks.first?.projectName == "kimi-project-1",
+                  kimiTasks.first?.displayState == .running else {
+                fputs("SELF_TEST_FAILED Kimi active task repository\n", stderr)
+                return 31
+            }
+
+            let projectMetadataFixture = Data("""
+            This directory is a local mirror of the ChatGPT project “中文项目名称”.
+            """.utf8)
+            guard CodexProjectNameResolver.projectName(
+                fromAgentInstructions: projectMetadataFixture
+            ) == "中文项目名称" else {
+                fputs("SELF_TEST_FAILED Codex Chinese project name\n", stderr)
+                return 32
+            }
+
             guard AppLayout.panelWidth == 240,
                   AppLayout.defaultWindowMode == .pinned,
                   AppLayout.alwaysOnTop else {
@@ -2916,7 +2955,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)

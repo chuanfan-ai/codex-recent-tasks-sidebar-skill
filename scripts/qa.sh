@@ -13,6 +13,11 @@ FIXTURE_RUNNING_ROLLOUT="$FIXTURE_DIR/running-rollout.jsonl"
 FIXTURE_ACTION_ROLLOUT="$FIXTURE_DIR/action-rollout.jsonl"
 FIXTURE_USAGE_SERVER="$FIXTURE_DIR/fake-codex"
 FIXTURE_FLAKY_USAGE_SERVER="$FIXTURE_DIR/fake-codex-flaky"
+FIXTURE_QWEN_DB="$FIXTURE_DIR/qwen-agents.db"
+FIXTURE_KIMI_INDEX="$FIXTURE_DIR/kimi-session-index.jsonl"
+FIXTURE_KIMI_RUNNING_DIR="$FIXTURE_DIR/kimi-running"
+FIXTURE_KIMI_IDLE_DIR="$FIXTURE_DIR/kimi-idle"
+FIXTURE_KIMI_MONITOR_DIR="$FIXTURE_DIR/kimi-monitor"
 
 "$ROOT/scripts/build_app.sh"
 /usr/bin/swiftc \
@@ -97,6 +102,72 @@ JSONL
   "UPDATE threads SET rollout_path=@running WHERE id='00000000-0000-0000-0000-000000000002';" \
   "UPDATE threads SET rollout_path=@action WHERE id='00000000-0000-0000-0000-000000000001';"
 
+/usr/bin/sqlite3 "$FIXTURE_QWEN_DB" <<'SQL'
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  path TEXT
+);
+CREATE TABLE chats (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  project_id TEXT,
+  updated_at INTEGER,
+  archived_at INTEGER,
+  deleted_at INTEGER,
+  ext TEXT
+);
+CREATE TABLE sub_chats (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  chat_id TEXT,
+  updated_at INTEGER,
+  stream_id TEXT
+);
+INSERT INTO projects VALUES
+  ('qwen-project-1', '千问中文项目', '/tmp/qwen-project-1');
+INSERT INTO chats VALUES
+  ('qwen-chat-running', '千问运行任务', 'qwen-project-1', 4102444800, NULL, NULL, '{"taskStatus":"running"}'),
+  ('qwen-chat-review', '千问待查看任务', 'qwen-project-1', 4102444700, NULL, NULL, '{"taskStatus":"completed"}'),
+  ('qwen-chat-idle', '千问已完成任务', 'qwen-project-1', 4102444600, NULL, NULL, '{"taskStatus":"completed"}');
+INSERT INTO sub_chats VALUES
+  ('qwen-sub-running', '千问运行线程', 'qwen-chat-running', 4102444800, 'stream-running'),
+  ('qwen-sub-review', '千问待查看线程', 'qwen-chat-review', 4102444700, ''),
+  ('qwen-sub-idle', '千问历史线程', 'qwen-chat-idle', 4102444600, '');
+SQL
+
+mkdir -p \
+  "$FIXTURE_KIMI_RUNNING_DIR/agents/main" \
+  "$FIXTURE_KIMI_IDLE_DIR/agents/main" \
+  "$FIXTURE_KIMI_MONITOR_DIR/agents/main"
+
+cat > "$FIXTURE_KIMI_INDEX" <<JSONL
+{"sessionId":"kimi-running","sessionDir":"$FIXTURE_KIMI_RUNNING_DIR","workDir":"/tmp/kimi-project-1"}
+{"sessionId":"kimi-idle","sessionDir":"$FIXTURE_KIMI_IDLE_DIR","workDir":"/tmp/kimi-project-2"}
+{"sessionId":"kimi-monitor","sessionDir":"$FIXTURE_KIMI_MONITOR_DIR","workDir":"/tmp/local-ai-statusbar-monitor"}
+JSONL
+
+cat > "$FIXTURE_KIMI_RUNNING_DIR/state.json" <<'JSON'
+{"createdAt":"2099-12-31T23:00:00.000Z","updatedAt":"2100-01-01T00:00:00.000Z","title":"Kimi 中文运行线程","isCustomTitle":true,"workDir":"/tmp/kimi-project-1"}
+JSON
+cat > "$FIXTURE_KIMI_IDLE_DIR/state.json" <<'JSON'
+{"createdAt":"2099-12-31T22:00:00.000Z","updatedAt":"2099-12-31T23:00:00.000Z","title":"Kimi 中文历史线程","isCustomTitle":true,"workDir":"/tmp/kimi-project-2"}
+JSON
+cat > "$FIXTURE_KIMI_MONITOR_DIR/state.json" <<'JSON'
+{"createdAt":"2099-12-31T21:00:00.000Z","updatedAt":"2099-12-31T22:00:00.000Z","title":"本机AI状态栏额度监控","isCustomTitle":true,"workDir":"/tmp/local-ai-statusbar-monitor"}
+JSON
+
+cat > "$FIXTURE_KIMI_RUNNING_DIR/agents/main/wire.jsonl" <<'JSONL'
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-running-step"}}
+JSONL
+cat > "$FIXTURE_KIMI_IDLE_DIR/agents/main/wire.jsonl" <<'JSONL'
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-idle-step"}}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"synthetic-idle-step"}}
+JSONL
+cat > "$FIXTURE_KIMI_MONITOR_DIR/agents/main/wire.jsonl" <<'JSONL'
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"synthetic-monitor-step"}}
+JSONL
+
 cat > "$FIXTURE_USAGE_SERVER" <<'ZSH'
 #!/bin/zsh
 request_count=0
@@ -145,6 +216,10 @@ self_test_output="$(
   CODEX_SELF_TEST_EXPECT_READ_ID="00000000-0000-0000-0000-000000000001" \
   CODEX_SELF_TEST_EXPECT_RUNNING_ID="00000000-0000-0000-0000-000000000002" \
   CODEX_SELF_TEST_EXPECT_ACTION_ID="00000000-0000-0000-0000-000000000001" \
+  QWEN_TASK_DB_OVERRIDE="$FIXTURE_QWEN_DB" \
+  QWEN_PENDING_CHAT_IDS_OVERRIDE="qwen-chat-review" \
+  KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
+  KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
   "$BINARY" --self-test
 )"
 after_hash="$(/usr/bin/shasum "$FIXTURE_DB")"
@@ -153,7 +228,7 @@ after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 after_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
 after_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok active_policy=ok qwen_usage=ok kimi_usage=ok qwen_state=ok kimi_state=ok qwen_repository=ok kimi_repository=ok compact_layout=ok bottom_dock=ok unread_update_count=1"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
