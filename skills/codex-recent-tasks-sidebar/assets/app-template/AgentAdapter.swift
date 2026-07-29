@@ -427,6 +427,38 @@ struct AgentAdapterRegistry: Sendable {
         ]
     )
 
+    func runtimeSnapshots(
+        using catalog: any ApplicationCatalog,
+        preservingDataFrom previousSnapshots: [AgentProductSnapshot]
+    ) -> [AgentProductSnapshot] {
+        let previousByID = Dictionary(
+            uniqueKeysWithValues: previousSnapshots.map {
+                ($0.id, $0)
+            }
+        )
+        return adapters.map { adapter in
+            let runtimeSnapshot = inspectProductRuntime(
+                adapter.descriptor,
+                using: catalog
+            )
+            guard runtimeSnapshot.health == .running,
+                  let previous = previousByID[runtimeSnapshot.id],
+                  previous.health == .running,
+                  previous.application == runtimeSnapshot.application else {
+                return runtimeSnapshot
+            }
+            return AgentProductSnapshot(
+                descriptor: runtimeSnapshot.descriptor,
+                application: runtimeSnapshot.application,
+                health: .running,
+                threads: previous.threads,
+                quotaSummary: previous.quotaSummary,
+                dataAvailability: previous.dataAvailability,
+                diagnostic: previous.diagnostic
+            )
+        }
+    }
+
     func snapshots(
         using catalog: any ApplicationCatalog
     ) async -> [AgentProductSnapshot] {
@@ -443,6 +475,53 @@ struct AgentAdapterRegistry: Sendable {
         }
         return results
     }
+}
+
+private func inspectProductRuntime(
+    _ descriptor: AgentProductDescriptor,
+    using catalog: any ApplicationCatalog
+) -> AgentProductSnapshot {
+    let application = descriptor.applicationPaths.lazy.compactMap {
+        catalog.application(atCandidatePath: $0)
+    }.first {
+        descriptor.bundleIdentifiers.contains($0.bundleIdentifier)
+    }
+
+    guard let application else {
+        return AgentProductSnapshot(
+            descriptor: descriptor,
+            application: nil,
+            health: .notInstalled,
+            threads: [],
+            quotaSummary: nil,
+            dataAvailability: .unavailable("应用未安装"),
+            diagnostic: nil
+        )
+    }
+
+    guard catalog.isRunning(
+        bundleIdentifier: application.bundleIdentifier
+    ) else {
+        return AgentProductSnapshot(
+            descriptor: descriptor,
+            application: application,
+            health: .detected,
+            threads: [],
+            quotaSummary: nil,
+            dataAvailability: .unavailable("应用未运行"),
+            diagnostic: nil
+        )
+    }
+
+    return AgentProductSnapshot(
+        descriptor: descriptor,
+        application: application,
+        health: .running,
+        threads: [],
+        quotaSummary: nil,
+        dataAvailability: .unavailable("会话数据刷新中"),
+        diagnostic: nil
+    )
 }
 
 struct SyntheticAgentProductApplicationCatalog: ApplicationCatalog {

@@ -3897,6 +3897,13 @@ final class AgentDiscoveryStore: ObservableObject {
     }
 
     func refresh() {
+        let runtimeSnapshots = registry.runtimeSnapshots(
+            using: catalog,
+            preservingDataFrom: snapshots
+        )
+        if snapshots != runtimeSnapshots {
+            snapshots = runtimeSnapshots
+        }
         guard refreshTask == nil else { return }
         let registry = registry
         let catalog = catalog
@@ -3905,8 +3912,12 @@ final class AgentDiscoveryStore: ObservableObject {
                 using: catalog
             )
             guard let self, !Task.isCancelled else { return }
-            if snapshots != updatedSnapshots {
-                snapshots = updatedSnapshots
+            let currentSnapshots = registry.runtimeSnapshots(
+                using: catalog,
+                preservingDataFrom: updatedSnapshots
+            )
+            if snapshots != currentSnapshots {
+                snapshots = currentSnapshots
             }
             refreshTask = nil
         }
