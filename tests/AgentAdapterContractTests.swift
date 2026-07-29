@@ -502,6 +502,7 @@ private struct AgentAdapterContractTests {
             "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok "
                 + "kimi_work_status=ok "
                 + "workbuddy_public_sessions=ok runtime_first=ok "
+                + "runtime_events=ok "
                 + "invalid_response=ok "
                 + "trae_ide_excluded=ok version_gate=ok isolation=ok "
                 + "presentation=ok"

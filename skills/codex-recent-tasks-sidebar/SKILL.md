@@ -12,7 +12,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 1. Confirm macOS 13+ and the presence of `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
 2. Keep all real Codex, QwenWorkCN, and Kimi task stores read-only. Never print, copy, upload, commit, or summarize real task titles, IDs, messages, database rows, session files, credentials, or raw quota responses.
 3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
-4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, Kimi CLI and Kimi Work independent fallback, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy runtime-first status publication, public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, and redaction.
+4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, Kimi CLI and Kimi Work independent fallback, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy runtime-first status publication, launch/terminate event refresh, public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, and redaction.
 5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
 6. Run `scripts/launch_synthetic_ui_qa.sh --launch` and verify the real macOS window with synthetic task fixtures. Do not inspect the accessibility tree or screenshots of the user's live task window.
 7. Verify:
@@ -67,6 +67,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - WorkBuddy matches only `/Applications/WorkBuddy.app` with Bundle ID `com.workbuddy.workbuddy`.
 - Use `NSWorkspace` to render the installed official application icon; do not copy trademark artwork into the repository.
 - Publish and refresh installed/running health before loading session data. A slow or unavailable sidecar/REST request must not hide or freeze the application process state; preserve already verified session data while the runtime state remains unchanged.
+- Refresh again after the status bar finishes launching, and immediately on monitored application launch/terminate notifications. Keep the 30-second timer only as a fallback.
 - Only version-gated WorkBuddy 5.3.5 may use the bundled public session contract.
 - Resolve public loopback REST endpoints only through the current user's owned sidecar socket. Require an owner-matching `0700` parent directory, a real Unix socket, `127.0.0.1`, an allowed path, bounded responses, GET-only requests, no redirects, cookies, cache, or credentials.
 - Retain only bounded session ID, name, update time, and current-state fields in memory. Display at most 12 current or last-48-hour summaries; never print, save, upload, or place real values in tests.
