@@ -55,7 +55,7 @@ done
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DIR/Contents/Info.plist")" == "本机AI状态栏" \
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DIR/Contents/Info.plist")" == "io.github.local-ai-statusbar" \
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Contents/Info.plist")" == "2.1.0" \
-   && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist")" == "11" ]] || {
+   && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist")" == "12" ]] || {
   print -u2 "应用名称自检失败"
   exit 19
 }
@@ -74,7 +74,7 @@ mkdir -p "$FIXTURE_DIR"
   "$ADAPTER_CONTRACT_TEST" \
   -o "$FIXTURE_DIR/agent-adapter-contract-tests"
 adapter_contract_output="$("$FIXTURE_DIR/agent-adapter-contract-tests")"
-[[ "$adapter_contract_output" == "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok kimi_work_status=ok workbuddy_public_sessions=ok invalid_response=ok trae_ide_excluded=ok version_gate=ok isolation=ok presentation=ok" ]] || {
+[[ "$adapter_contract_output" == "AGENT_ADAPTER_CONTRACT_OK products=2 official_icons=ok kimi_work_status=ok workbuddy_public_sessions=ok runtime_first=ok invalid_response=ok trae_ide_excluded=ok version_gate=ok isolation=ok presentation=ok" ]] || {
   print -u2 "Agent 适配器契约自检失败：$adapter_contract_output"
   exit 23
 }

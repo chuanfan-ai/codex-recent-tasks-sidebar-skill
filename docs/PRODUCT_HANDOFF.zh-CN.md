@@ -1,7 +1,8 @@
 # 本机AI状态栏：产品交接与推进基线
 
-更新日期：2026-07-28  
-当前版本：2.1.0（Build 11）
+更新日期：2026-07-29
+
+当前版本：2.1.0（Build 12）
 当前开发分支：`feat/local-ai-statusbar`
 
 ## 1. 产品入口
@@ -52,6 +53,7 @@
 - 新增统一 `LocalAgentAdapter` 契约，定义产品描述、支持等级、能力、应用元数据、健康状态与故障隔离。
 - WorkBuddy 与 TRAE Work 分别作为独立产品栏展示，产品名称与 Codex、QwenWorkCN、Kimi 使用相同字号和字重，并动态使用已安装应用包内的官方 Logo，缺失时回退到系统 App 图标。
 - WorkBuddy 5.3.5 通过随包公开 REST 契约显示当前和最近 48 小时的会话摘要；TRAE Work 的线程与两款产品的余额在没有稳定契约时显示“—”，不用进程数、旧缓存或猜测填充。
+- WorkBuddy 与 TRAE Work 的应用安装/运行状态先同步发布，再后台读取会话等可验证数据；后台读取慢或暂不可用时，进程状态仍按 30 秒刷新周期独立更新。运行态未变化时会保留上一份已验证数据，避免周期性闪空。
 
 ### 支持矩阵
 
@@ -129,7 +131,7 @@ Kimi Work 只读检查 `~/Library/Application Support/kimi-desktop/kimi-agent/` 
         └── AppIcon.icns             App 图标
 ```
 
-统一适配器模型与 WorkBuddy/TRAE Work 发现逻辑已从主文件拆到 `AgentAdapter.swift`。Codex、QwenWorkCN、Kimi 的既有状态聚合和主要 SwiftUI 展示仍集中在主文件；继续增加可读任务的适配器前，应再拆出状态聚合层、窗口层和视图层。
+统一适配器模型、WorkBuddy/TRAE Work 发现逻辑和运行态快照合并已从主文件拆到 `AgentAdapter.swift`。`AgentDiscoveryStore` 先发布运行态快照，再后台补充适配器数据；即使某个数据读取任务仍在进行，后续计时刷新也会继续更新应用进程状态。Codex、QwenWorkCN、Kimi 的既有状态聚合和主要 SwiftUI 展示仍集中在主文件；继续增加可读任务的适配器前，应再拆出状态聚合层、窗口层和视图层。
 
 ## 6. 质量基线
 
@@ -148,6 +150,7 @@ Kimi Work 只读检查 `~/Library/Application Support/kimi-desktop/kimi-agent/` 
 - 三类额度解析、故障恢复和窄栏文案
 - Kimi Work 状态/未读三态、已读完成项排除、Work/CLI 独立回退和输入文件只读哈希
 - WorkBuddy 与 TRAE Work 的精确 Bundle 匹配、应用包内官方 Logo、TRAE IDE 排除、元数据最小化和适配器故障隔离
+- WorkBuddy/TRAE Work 从未运行到运行的即时状态提升、后台数据保留，以及运行状态不受会话读取阻塞
 - WorkBuddy 公开会话端点约束、会话解析、48 小时窗口、数量上限和版本闸门
 - WorkBuddy 与 TRAE Work 的平级产品标题、活动数/余额/线程区域，以及界面不出现分组说明、模式说明或“待适配”徽标
 - 独立 Bundle ID 的合成桌面验收副本，阻止布局工具接触真实任务标题

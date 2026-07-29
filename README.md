@@ -36,6 +36,7 @@ open "build/本机AI状态栏.app"
 - 固定宽度 240 像素，使用较小的系统字号，适合作为长期监控窄栏。
 - Codex、QwenWorkCN、Kimi、WorkBuddy 与 TRAE Work 使用相同层级的独立产品栏，不增加额外分组标题。
 - WorkBuddy 5.3.5 使用应用包内的官方 Logo，并通过随包公开 REST 契约显示当前和最近 48 小时的会话摘要；没有公开余额接口，因此余额固定显示“—”。
+- WorkBuddy 与 TRAE Work 的安装/运行状态先独立刷新，再后台补充可验证数据；会话接口慢或暂不可用时，仍会按本机应用进程显示正确状态。
 - TRAE Work 使用应用包内的官方 Logo 并保留相同的活动数、余额和线程区域；在没有稳定外部只读契约时显示“—”，不把进程数或猜测当作线程和余额。
 - “活动线程”包括“运行中”“待操作”“待查看”，已完成且无待查看更新的历史线程不会显示。
 - Kimi 产品栏合并 Kimi CLI 与 Kimi 桌面客户端 Work 模式：Work 模式的 `running`、`blocked`、`completed + 未读` 分别显示为“运行中”“待操作”“待查看”，已完成且已读的线程不显示。
@@ -71,7 +72,7 @@ open "build/本机AI状态栏.app"
 ./scripts/launch_synthetic_ui_qa.sh --launch
 ```
 
-验收包含原生构建、Swift 严格并发检查、应用名称与版本检查、临时签名、架构检查、三类 Agent 的固定合成测试库、自检、Kimi Work 三态与未读解析、Work/CLI 独立回退、额度解析与故障恢复、Kimi 总量合并与“总量 / Code 5h / Code 7天”窄栏展示、QwenWorkCN 非消费式待查看读取、两款产品的官方图标、WorkBuddy 公开会话解析与版本闸门、TRAE IDE 排除、平级展示契约、故障隔离、输入文件只读哈希比对和脱敏扫描。
+验收包含原生构建、Swift 严格并发检查、应用名称与版本检查、临时签名、架构检查、三类 Agent 的固定合成测试库、自检、Kimi Work 三态与未读解析、Work/CLI 独立回退、额度解析与故障恢复、Kimi 总量合并与“总量 / Code 5h / Code 7天”窄栏展示、QwenWorkCN 非消费式待查看读取、两款产品的官方图标、WorkBuddy 运行状态优先发布、公开会话解析与版本闸门、TRAE IDE 排除、平级展示契约、故障隔离、输入文件只读哈希比对和脱敏扫描。
 
 `qa.sh` 还会准备独立的“本机AI状态栏 QA”副本。布局、可访问性树、240 像素宽度、置顶和吸附验收必须通过 `launch_synthetic_ui_qa.sh` 启动该副本，避免桌面验收工具读取真实任务标题。未经用户确认不得覆盖 `/Applications` 中的应用。
 
