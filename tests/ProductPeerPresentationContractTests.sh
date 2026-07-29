@@ -57,4 +57,4 @@ product_section="$(
 /usr/bin/grep -Fq 'ForEach(discoveryStore.snapshots)' "$SOURCE" \
   || fail "products are not rendered as peers"
 
-print "PRODUCT_PEER_PRESENTATION_OK products=peer icons=official threads=present quota_slot=present visible_copy=minimal"
+print "PRODUCT_PEER_PRESENTATION_OK products=peer icons=official runtime_status=visible threads=present quota_slot=present visible_copy=minimal"

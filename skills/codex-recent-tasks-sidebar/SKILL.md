@@ -26,6 +26,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
    - QwenWorkCN opens the exact local Chat ID through its desktop bridge;
    - Kimi opens the Agent page, with exact-session navigation reported as unavailable until a verifiable upstream route exists;
    - WorkBuddy and TRAE Work appear as peer product sections with official bundled marks and the same product-name typography as Codex, QwenWorkCN, and Kimi;
+   - each discovered product renders `运行中 / 已安装 / 未安装` directly in its title row, independently from thread availability;
    - WorkBuddy shows verified current/recent public session summaries on supported versions, while unavailable thread or balance sources render `—`;
    - TRAE Work keeps matching activity, balance, and thread regions but renders `—` until a stable external read-only contract exists;
    - quota failures degrade to a visible unavailable/stale state without blocking task monitoring.
@@ -92,6 +93,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Keep available Kimi quota values in the neutral secondary text color regardless of the remaining percentage. Reserve the warning color for stale or unavailable quota data.
 - Group active threads by real project name. Do not substitute English demo labels in live UI.
 - Render WorkBuddy and TRAE Work as separate peer product sections after Kimi. Match the existing product-name font size and weight; do not add a group heading, mode label, or visible `待适配` badge.
+- Render `运行中 / 已安装 / 未安装` directly in each discovered product title row. Never use `线程 —` as a substitute for application process state.
 - Give each product the same activity-count, balance, and thread-list regions. Missing production data must show `—`; synthetic QA may use fixed fake values only to validate layout.
 - Always-on-top is the invariant. Docked versus pinned changes position, not layer.
 - Docking aligns bottom edges, not top edges.
