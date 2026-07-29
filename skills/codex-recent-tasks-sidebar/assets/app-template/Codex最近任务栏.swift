@@ -1202,27 +1202,24 @@ struct KimiTaskRepository {
     ) {
         var sourceURLs: [URL] = []
         var tasks: [LocalAgentTask] = []
-        var firstError: Error?
 
         do {
             let loaded = try KimiCLITaskRepository.loadActiveTasks()
             sourceURLs.append(loaded.indexURL)
             tasks.append(contentsOf: loaded.tasks)
         } catch {
-            firstError = error
+            // CLI 与 Work 数据源互相隔离；继续尝试 Work。
         }
         do {
             let loaded = try KimiWorkTaskRepository.loadActiveTasks()
             sourceURLs.insert(loaded.sourceURL, at: 0)
             tasks.append(contentsOf: loaded.tasks)
         } catch {
-            if firstError == nil {
-                firstError = error
-            }
+            // Work 不可用时仍保留已确认的 CLI 活动。
         }
 
         guard let indexURL = sourceURLs.first else {
-            throw firstError ?? TaskRepositoryError.databaseNotFound
+            throw KimiTaskRepositoryError.unavailable
         }
         var seenIDs = Set<String>()
         let mergedTasks = tasks.filter {
@@ -1252,6 +1249,14 @@ struct KimiTaskRepository {
         case .idle:
             return 3
         }
+    }
+}
+
+private enum KimiTaskRepositoryError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "暂时没有读取到 Kimi CLI 或 Kimi Work 的本机任务状态"
     }
 }
 

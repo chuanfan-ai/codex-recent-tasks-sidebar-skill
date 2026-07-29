@@ -1,7 +1,7 @@
 # 本机AI状态栏：产品交接与推进基线
 
 更新日期：2026-07-28  
-当前版本：2.1.0（Build 10）
+当前版本：2.1.0（Build 11）
 当前开发分支：`feat/local-ai-statusbar`
 
 ## 1. 产品入口
@@ -44,10 +44,11 @@
 
 ### Agent 状态
 
-- 同时显示 Codex、QwenWorkCN、Kimi。
+- 同时显示 Codex、QwenWorkCN、Kimi；Kimi 产品栏合并 CLI 与桌面客户端 Work 模式。
 - “活动线程”统一包括：运行中、待操作、待查看。
 - 已完成且没有待查看更新的历史线程不显示。
-- 按真实项目分组，显示各产品保存的中文项目名和中文线程名。
+- Kimi Work 将本机 `running`、`blocked`、`completed + 未读` 分别映射为“运行中”“待操作”“待查看”；普通已完成且已读的 Work 线程不显示。
+- 按项目分组，优先显示各产品保存的中文项目名和中文线程名；Kimi Work 没有落盘映射时统一归入“Kimi Work”并显示中文状态名称。
 - 新增统一 `LocalAgentAdapter` 契约，定义产品描述、支持等级、能力、应用元数据、健康状态与故障隔离。
 - WorkBuddy 与 TRAE Work 分别作为独立产品栏展示，产品名称与 Codex、QwenWorkCN、Kimi 使用相同字号和字重，并动态使用已安装应用包内的官方 Logo，缺失时回退到系统 App 图标。
 - WorkBuddy 5.3.5 通过随包公开 REST 契约显示当前和最近 48 小时的会话摘要；TRAE Work 的线程与两款产品的余额在没有稳定契约时显示“—”，不用进程数、旧缓存或猜测填充。
@@ -58,7 +59,7 @@
 |---|---|---:|---:|---|---|
 | Codex | 完整支持 | 是 | 是 | 精确任务 | 只读任务索引、未读 ID、事件类型与官方用量服务 |
 | QwenWorkCN | 完整支持 | 是 | 是 | 精确任务 | 只读数据库字段、非消费式待查看集合与桌面桥 |
-| Kimi | 部分支持 | 是 | 是 | Agent 首页 | 有界会话元数据、进程工作目录、聚合额度与 CLI |
+| Kimi | 部分支持 | 是 | 是 | Agent 首页 | Work 本机状态/未读快照、CLI 有界会话元数据、进程工作目录与聚合额度 |
 | WorkBuddy | 部分支持 | 是（公开摘要） | 否 | 打开应用 | 应用元数据、当前用户私有 sidecar 与公开 loopback REST |
 | TRAE Work | 已发现但未支持 | 否 | 否 | 打开应用 | 应用路径、Bundle ID、版本和运行状态 |
 
@@ -98,6 +99,8 @@
 - 不自动结束、归档、删除或重新排序任何 Agent 任务。
 - 不在未经确认时覆盖 `/Applications` 中的现有 App。
 - 不把用户本机的私有状态数据放入测试库、安装包、日志或远端仓库。
+
+Kimi Work 只读检查 `~/Library/Application Support/kimi-desktop/kimi-agent/` 下的 `conversation-statuses.json`、`conversation-unread.json` 和可选的 `conversation-titles.json`。状态、未读集合和标题都采用有界解析，仅在内存中用于本机显示；不读取会话正文，不打印、复制或上传会话键和标题。标题文件缺失时使用“Kimi Work 运行中 / 待操作 / 待查看”，不把内部键当标题。
 
 测试必须使用脚本临时生成的固定合成数据。真实桌面验收只观察必要的状态结果，不输出任务名称、内容和 ID。
 
@@ -140,9 +143,10 @@
 
 - 原生构建与 Swift 严格并发检查
 - App 名称、Info.plist、架构和临时签名
-- Codex、QwenWorkCN、Kimi 固定合成测试库
+- Codex、QwenWorkCN、Kimi CLI 与 Kimi Work 固定合成测试库
 - 活动线程、待查看、项目分组和中文名称
 - 三类额度解析、故障恢复和窄栏文案
+- Kimi Work 状态/未读三态、已读完成项排除、Work/CLI 独立回退和输入文件只读哈希
 - WorkBuddy 与 TRAE Work 的精确 Bundle 匹配、应用包内官方 Logo、TRAE IDE 排除、元数据最小化和适配器故障隔离
 - WorkBuddy 公开会话端点约束、会话解析、48 小时窗口、数量上限和版本闸门
 - WorkBuddy 与 TRAE Work 的平级产品标题、活动数/余额/线程区域，以及界面不出现分组说明、模式说明或“待适配”徽标
@@ -175,7 +179,8 @@
 - 日常构建采用 ad-hoc 签名。2026-07-28 已生成 Developer ID 签名的 2.1.0（Build 8）候选包并通过 `codesign --verify --deep --strict`，但本机未确认 notarytool 凭据，系统评估仍为 `Unnotarized Developer ID`；不得向外部用户分发。
 - QwenWorkCN 额度依赖桌面端当前提供的本机调试接口，上游变化可能导致暂时不可用。
 - Kimi 总量依赖桌面端已经刷新本机订阅日志；Code 限额依赖已安装且登录的 Kimi CLI。
-- Kimi 活动判断依赖安全可确认的进程工作目录；无法确认时按无活动处理，避免把旧日志误报为运行中。
+- Kimi CLI 活动判断依赖安全可确认的进程工作目录；无法确认时按无活动处理，避免把旧日志误报为运行中。
+- Kimi Work 依赖桌面客户端最后写入本机的状态与未读快照；状态新鲜度取决于 Kimi 客户端是否及时刷新。客户端没有落盘标题时，状态栏只能显示中文状态名称。
 - Kimi 尚不能精确跳到单个会话。
 - WorkBuddy 仅在已验证的 5.3.5 版本上支持公开会话摘要；sidecar 或公开 REST 端点不可用时线程显示“—”，没有公开余额或精确会话跳转契约。
 - TRAE Work 尚无经过验证的稳定外部线程、额度或精确任务跳转契约。

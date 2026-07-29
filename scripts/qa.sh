@@ -55,7 +55,7 @@ done
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DIR/Contents/Info.plist")" == "本机AI状态栏" \
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DIR/Contents/Info.plist")" == "io.github.local-ai-statusbar" \
    && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Contents/Info.plist")" == "2.1.0" \
-   && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist")" == "10" ]] || {
+   && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/Info.plist")" == "11" ]] || {
   print -u2 "应用名称自检失败"
   exit 19
 }
@@ -410,6 +410,40 @@ activity_probe_output="$(
   exit 20
 }
 
+kimi_work_only_probe_output="$(
+  CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
+  CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
+  CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_GLOBAL_STATE" \
+  CODEX_ROLLOUT_ROOT_OVERRIDE="$FIXTURE_DIR" \
+  QWEN_TASK_DB_OVERRIDE="$FIXTURE_QWEN_DB" \
+  QWEN_DESKTOP_SNAPSHOT_OVERRIDE="$FIXTURE_QWEN_SNAPSHOT" \
+  KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_DIR/missing-kimi-index.jsonl" \
+  KIMI_WORK_STATUS_DIRECTORY_OVERRIDE="$FIXTURE_KIMI_WORK_DIR" \
+  "$BINARY" --activity-probe
+)"
+[[ "$kimi_work_only_probe_output" == "ACTIVITY_PROBE_OK codex=2 qwen=2 kimi=3" ]] || {
+  print -u2 "Kimi Work 独立活动探测自检失败：$kimi_work_only_probe_output"
+  exit 25
+}
+
+kimi_cli_only_probe_output="$(
+  CODEX_TASK_DB_OVERRIDE="$FIXTURE_DB" \
+  CODEX_SESSION_INDEX_OVERRIDE="$FIXTURE_INDEX" \
+  CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_GLOBAL_STATE" \
+  CODEX_ROLLOUT_ROOT_OVERRIDE="$FIXTURE_DIR" \
+  QWEN_TASK_DB_OVERRIDE="$FIXTURE_QWEN_DB" \
+  QWEN_DESKTOP_SNAPSHOT_OVERRIDE="$FIXTURE_QWEN_SNAPSHOT" \
+  KIMI_SESSION_INDEX_OVERRIDE="$FIXTURE_KIMI_INDEX" \
+  KIMI_MONITOR_SESSION_ID_OVERRIDE="kimi-monitor" \
+  KIMI_ACTIVE_WORK_DIRS_OVERRIDE="/tmp/Kimi中文项目" \
+  KIMI_WORK_STATUS_DIRECTORY_OVERRIDE="$FIXTURE_DIR/missing-kimi-work" \
+  "$BINARY" --activity-probe
+)"
+[[ "$kimi_cli_only_probe_output" == "ACTIVITY_PROBE_OK codex=2 qwen=2 kimi=1" ]] || {
+  print -u2 "Kimi CLI 独立活动探测回退失败：$kimi_cli_only_probe_output"
+  exit 26
+}
+
 set +e
 missing_usage_output="$({
   CODEX_APP_SERVER_OVERRIDE="$FIXTURE_DIR/missing-codex" \
@@ -511,4 +545,6 @@ print "$usage_resilience_output"
 print "$qwen_bridge_output"
 print "$kimi_usage_output"
 print "$activity_probe_output"
+print "$kimi_work_only_probe_output"
+print "$kimi_cli_only_probe_output"
 print "QA_OK app=$APP_DIR"

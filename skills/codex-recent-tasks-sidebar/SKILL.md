@@ -12,7 +12,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 1. Confirm macOS 13+ and the presence of `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
 2. Keep all real Codex, QwenWorkCN, and Kimi task stores read-only. Never print, copy, upload, commit, or summarize real task titles, IDs, messages, database rows, session files, credentials, or raw quota responses.
 3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
-4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, and redaction.
+4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, Kimi CLI and Kimi Work independent fallback, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, and redaction.
 5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
 6. Run `scripts/launch_synthetic_ui_qa.sh --launch` and verify the real macOS window with synthetic task fixtures. Do not inspect the accessibility tree or screenshots of the user's live task window.
 7. Verify:
@@ -49,6 +49,11 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 
 ### Kimi
 
+- Merge Kimi CLI activity with Kimi desktop Work-mode activity in the same product section. Either source must keep working when the other is unavailable.
+- For Work mode, read only bounded copies of `conversation-statuses.json`, `conversation-unread.json`, and optional `conversation-titles.json` under `~/Library/Application Support/kimi-desktop/kimi-agent/`.
+- Map `running` to running, `blocked` to waiting for action, and `completed` plus unread to pending review. Exclude completed-and-read records.
+- Keep conversation keys and optional titles in memory only. Never print, persist, copy, upload, or expose keys; when no title is stored, use a generic Chinese state label.
+- `KIMI_WORK_STATUS_DIRECTORY_OVERRIDE` is fixture-only. Point it only at the generated synthetic QA directory and never set it for production launches.
 - Read only the local session index, state metadata, and `context.append_loop_event` records needed to balance `step.begin` and `step.end`.
 - Bound wire-file reads and prefilter event lines before JSON parsing.
 - Treat an unmatched `step.begin` as only an activity candidate. Display it only when a currently running `kimi` executable has the same working directory; fail closed when the process cannot be verified.
