@@ -5301,6 +5301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let kimiStore = KimiStore()
     private let discoveryStore = AgentDiscoveryStore()
     private let windowMode = WindowModeModel()
+    private lazy var agentRuntimeRefreshCoordinator =
+        AgentRuntimeRefreshCoordinator(
+            registry: .firstBatch
+        ) { [weak self] in
+            self?.discoveryStore.refresh()
+        }
     private var panel: NSPanel?
     private var statusItem: NSStatusItem?
     private var dockTimer: Timer?
@@ -5312,6 +5318,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self,
             selector: #selector(workspaceApplicationDidActivate(_:)),
             name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(
+                workspaceApplicationRuntimeDidChange(_:)
+            ),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(
+                workspaceApplicationRuntimeDidChange(_:)
+            ),
+            name: NSWorkspace.didTerminateApplicationNotification,
             object: nil
         )
         windowMode.onModeChange = { [weak self] mode in
@@ -5327,6 +5349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         createStatusItem()
         applyWindowMode(windowMode.mode)
         showPanel()
+        agentRuntimeRefreshCoordinator.applicationDidFinishLaunching()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -5511,6 +5534,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func workspaceApplicationDidActivate(_ notification: Notification) {
         updateDockedWindowLevel()
+    }
+
+    @objc private func workspaceApplicationRuntimeDidChange(
+        _ notification: Notification
+    ) {
+        let application = notification.userInfo?[
+            NSWorkspace.applicationUserInfoKey
+        ] as? NSRunningApplication
+        agentRuntimeRefreshCoordinator.applicationRuntimeDidChange(
+            bundleIdentifier: application?.bundleIdentifier
+        )
     }
 
     private func updateDockedWindowLevel() {

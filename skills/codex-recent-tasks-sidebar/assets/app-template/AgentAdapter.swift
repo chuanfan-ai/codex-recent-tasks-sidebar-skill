@@ -477,6 +477,38 @@ struct AgentAdapterRegistry: Sendable {
     }
 }
 
+@MainActor
+final class AgentRuntimeRefreshCoordinator {
+    private let registry: AgentAdapterRegistry
+    private let refreshAction: () -> Void
+
+    init(
+        registry: AgentAdapterRegistry,
+        refreshAction: @escaping () -> Void
+    ) {
+        self.registry = registry
+        self.refreshAction = refreshAction
+    }
+
+    func applicationDidFinishLaunching() {
+        refreshAction()
+    }
+
+    func applicationRuntimeDidChange(
+        bundleIdentifier: String?
+    ) {
+        guard let bundleIdentifier,
+              registry.adapters.contains(where: {
+                  $0.descriptor.bundleIdentifiers.contains(
+                      bundleIdentifier
+                  )
+              }) else {
+            return
+        }
+        refreshAction()
+    }
+}
+
 private func inspectProductRuntime(
     _ descriptor: AgentProductDescriptor,
     using catalog: any ApplicationCatalog
