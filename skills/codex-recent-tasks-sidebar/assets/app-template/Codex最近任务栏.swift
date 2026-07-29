@@ -4668,6 +4668,15 @@ struct DiscoveredProductSectionView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
+                    Text(presentation.statusText)
+                        .font(.system(size: 8.3, weight: .medium))
+                        .foregroundStyle(
+                            snapshot.isRunning
+                                ? productTint : Color.secondary
+                        )
+                        .lineLimit(1)
+                        .fixedSize()
+
                     Text(snapshot.activeTaskCount.map(String.init) ?? "—")
                         .font(.system(size: 8.5, weight: .bold, design: .rounded))
                         .foregroundStyle(
