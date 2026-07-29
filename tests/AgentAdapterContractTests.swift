@@ -269,6 +269,37 @@ private struct AgentAdapterContractTests {
         ] else {
             fail("runtime refresh preserves product data")
         }
+
+        let runtimeRefreshCounts = await MainActor.run {
+            var refreshCount = 0
+            let coordinator = AgentRuntimeRefreshCoordinator(
+                registry: runtimeRegistry
+            ) {
+                refreshCount += 1
+            }
+            coordinator.applicationDidFinishLaunching()
+            let afterApplicationLaunch = refreshCount
+            coordinator.applicationRuntimeDidChange(
+                bundleIdentifier: "com.example.unrelated"
+            )
+            let afterUnrelatedApplication = refreshCount
+            coordinator.applicationRuntimeDidChange(
+                bundleIdentifier: "com.workbuddy.workbuddy"
+            )
+            let afterWorkBuddyLaunch = refreshCount
+            coordinator.applicationRuntimeDidChange(
+                bundleIdentifier: "com.trae.solo.app"
+            )
+            return [
+                afterApplicationLaunch,
+                afterUnrelatedApplication,
+                afterWorkBuddyLaunch,
+                refreshCount,
+            ]
+        }
+        guard runtimeRefreshCounts == [1, 1, 2, 3] else {
+            fail("runtime event refresh coordination")
+        }
         guard AgentAdapterRegistry.firstBatch.adapters.map(
             \.descriptor.id
         ) == ["workbuddy", "trae-work"] else {
