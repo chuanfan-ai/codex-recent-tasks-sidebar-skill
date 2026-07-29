@@ -1184,37 +1184,13 @@ private func inspectProduct(
     using catalog: any ApplicationCatalog,
     dataSource: any AgentProductDataSource
 ) async -> AgentProductSnapshot {
-    let application = descriptor.applicationPaths.lazy.compactMap {
-        catalog.application(atCandidatePath: $0)
-    }.first {
-        descriptor.bundleIdentifiers.contains($0.bundleIdentifier)
-    }
-
-    guard let application else {
-        return AgentProductSnapshot(
-            descriptor: descriptor,
-            application: nil,
-            health: .notInstalled,
-            threads: [],
-            quotaSummary: nil,
-            dataAvailability: .unavailable("应用未安装"),
-            diagnostic: nil
-        )
-    }
-
-    let isRunning = catalog.isRunning(
-        bundleIdentifier: application.bundleIdentifier
+    let runtimeSnapshot = inspectProductRuntime(
+        descriptor,
+        using: catalog
     )
-    guard isRunning else {
-        return AgentProductSnapshot(
-            descriptor: descriptor,
-            application: application,
-            health: .detected,
-            threads: [],
-            quotaSummary: nil,
-            dataAvailability: .unavailable("应用未运行"),
-            diagnostic: nil
-        )
+    guard runtimeSnapshot.health == .running,
+          let application = runtimeSnapshot.application else {
+        return runtimeSnapshot
     }
 
     let dataSnapshot: AgentProductDataSnapshot
