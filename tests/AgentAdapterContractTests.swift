@@ -219,6 +219,56 @@ private struct AgentAdapterContractTests {
               snapshots[2] == traeWorkSnapshot else {
             fail("adapter failure isolation")
         }
+
+        let runtimeRegistry = AgentAdapterRegistry(
+            adapters: [workBuddy, traeWork]
+        )
+        let stoppedCatalog = SyntheticApplicationCatalog(
+            applicationsByPath: installedCatalog.applicationsByPath,
+            runningBundleIdentifiers: []
+        )
+        let stoppedRuntimeSnapshots = runtimeRegistry.runtimeSnapshots(
+            using: stoppedCatalog,
+            preservingDataFrom: []
+        )
+        guard stoppedRuntimeSnapshots.count == 2,
+              stoppedRuntimeSnapshots[0].health == .detected,
+              stoppedRuntimeSnapshots[0].threads.isEmpty,
+              stoppedRuntimeSnapshots[0].activeTaskCount == nil,
+              stoppedRuntimeSnapshots[0].dataAvailability == .unavailable(
+                  "应用未运行"
+              ) else {
+            fail("stopped runtime snapshot")
+        }
+
+        let startedRuntimeSnapshots = runtimeRegistry.runtimeSnapshots(
+            using: installedCatalog,
+            preservingDataFrom: stoppedRuntimeSnapshots
+        )
+        guard startedRuntimeSnapshots.count == 2,
+              startedRuntimeSnapshots[0].health == .running,
+              startedRuntimeSnapshots[0].threads.isEmpty,
+              startedRuntimeSnapshots[0].activeTaskCount == nil,
+              startedRuntimeSnapshots[0].dataAvailability == .unavailable(
+                  "会话数据刷新中"
+              ),
+              startedRuntimeSnapshots[1].health == .running else {
+            fail("running status before data refresh")
+        }
+
+        let preservedRuntimeSnapshots = runtimeRegistry.runtimeSnapshots(
+            using: installedCatalog,
+            preservingDataFrom: [
+                workBuddySnapshot,
+                traeWorkSnapshot,
+            ]
+        )
+        guard preservedRuntimeSnapshots == [
+            workBuddySnapshot,
+            traeWorkSnapshot,
+        ] else {
+            fail("runtime refresh preserves product data")
+        }
         guard AgentAdapterRegistry.firstBatch.adapters.map(
             \.descriptor.id
         ) == ["workbuddy", "trae-work"] else {
