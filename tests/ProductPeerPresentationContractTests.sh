@@ -35,6 +35,8 @@ product_section="$(
 
 [[ "$product_section" == *'Text(snapshot.descriptor.displayName)'* ]] \
   || fail "missing product name"
+[[ "$product_section" == *'Text(presentation.statusText)'* ]] \
+  || fail "runtime status is not directly visible"
 [[ "$product_section" == *'.font(.system(size: 11, weight: .semibold))'* ]] \
   || fail "product name does not match agent heading typography"
 [[ "$product_section" == *'snapshot.officialBrandMarkPath'* ]] \
