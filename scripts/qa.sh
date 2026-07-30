@@ -41,6 +41,10 @@ done
 
 "$PRODUCT_PRESENTATION_CONTRACT_TEST"
 "$ROOT/scripts/build_app.sh"
+if /usr/bin/strings "$BINARY" | /usr/bin/grep -F "$HOME/" > /dev/null; then
+  print -u2 "构建产物包含打包机 Home 绝对路径"
+  exit 27
+fi
 /usr/bin/swiftc \
   -parse-as-library \
   -target "$(/usr/bin/uname -m)-apple-macos13.0" \
