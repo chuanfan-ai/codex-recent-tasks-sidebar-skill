@@ -1,8 +1,8 @@
 # 本机AI状态栏：产品交接与推进基线
 
-更新日期：2026-07-29
+更新日期：2026-07-30
 
-当前版本：2.1.0（Build 14）
+当前版本：2.1.0（Build 15）
 当前开发分支：`feat/local-ai-statusbar`
 
 ## 1. 产品入口
@@ -145,6 +145,7 @@ Kimi Work 只读检查 `~/Library/Application Support/kimi-desktop/kimi-agent/` 
 
 - 原生构建与 Swift 严格并发检查
 - App 名称、Info.plist、架构和临时签名
+- 正式构建从 `/private/tmp` 独立临时目录编译，并阻断二进制中出现打包机 Home 绝对路径
 - Codex、QwenWorkCN、Kimi CLI 与 Kimi Work 固定合成测试库
 - 活动线程、待查看、项目分组和中文名称
 - 三类额度解析、故障恢复和窄栏文案

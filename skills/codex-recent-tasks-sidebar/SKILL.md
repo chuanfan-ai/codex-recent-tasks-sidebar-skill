@@ -11,8 +11,8 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 
 1. Confirm macOS 13+ and the presence of `/usr/bin/swiftc`, `/usr/bin/sqlite3`, `/usr/bin/codesign`, and `/usr/bin/plutil`.
 2. Keep all real Codex, QwenWorkCN, and Kimi task stores read-only. Never print, copy, upload, commit, or summarize real task titles, IDs, messages, database rows, session files, credentials, or raw quota responses.
-3. Build with `scripts/build_app.sh [output-directory]`. It creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
-4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, Kimi CLI and Kimi Work independent fallback, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy runtime-first status publication, launch/terminate event refresh, public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, and redaction.
+3. Build with `scripts/build_app.sh [output-directory]`. It compiles from a validated `/private/tmp` scratch directory, removes that scratch directory on exit, and creates the ad-hoc-signed `本机AI状态栏.app` for the current Mac architecture.
+4. Run repository-level `scripts/qa.sh`. The fixed fixtures must cover all three established agents, Kimi CLI and Kimi Work independent fallback, active-only filtering, Chinese names, the 240-point layout, bottom-aligned docking, quota parsing, fault recovery, official bundled product marks, WorkBuddy runtime-first status publication, launch/terminate event refresh, public-session parsing and version gating, TRAE Work discovery, failure isolation, input hashes, signing, builder Home path rejection, and redaction.
 5. Launch only the app in the build directory unless the user explicitly authorizes an `/Applications` write.
 6. Run `scripts/launch_synthetic_ui_qa.sh --launch` and verify the real macOS window with synthetic task fixtures. Do not inspect the accessibility tree or screenshots of the user's live task window.
 7. Verify:
@@ -109,6 +109,7 @@ Use the bundled native SwiftUI template. Preserve the local-only privacy boundar
 - Do not present Kimi navigation as exact until a working per-session route is independently verified.
 - Treat upstream schema, local bridge, CLI output, bundle ID, and deep-link changes as adapter failures, not permission to inspect secrets.
 - Do not conflate a product being installed or running with task monitoring support.
+- Never deliver an App or source package containing the builder's Home absolute path.
 
 ## Delivery report
 
