@@ -1238,6 +1238,13 @@ final class TaskStore: ObservableObject {
 struct UsageWindowDisplay: Identifiable, Equatable, Sendable {
     let label: String
     let remainingPercent: Int
+    let resetAt: Date?
+
+    init(label: String, remainingPercent: Int, resetAt: Date? = nil) {
+        self.label = label
+        self.remainingPercent = remainingPercent
+        self.resetAt = resetAt
+    }
 
     var id: String { label }
 }
@@ -1287,7 +1294,8 @@ enum UsageSnapshotParser {
             let duration = (rawWindow["windowDurationMins"] as? NSNumber)?.intValue
             return UsageWindowDisplay(
                 label: durationLabel(minutes: duration, fallback: candidate.fallback),
-                remainingPercent: 100 - usedPercent
+                remainingPercent: 100 - usedPercent,
+                resetAt: resetDate(from: rawWindow["resetsAt"])
             )
         }
 
@@ -1303,6 +1311,13 @@ enum UsageSnapshotParser {
         if minutes % 1_440 == 0 { return "\(minutes / 1_440) 天" }
         if minutes % 60 == 0 { return "\(minutes / 60) 小时" }
         return "\(minutes) 分钟"
+    }
+
+    private static func resetDate(from value: Any?) -> Date? {
+        guard let seconds = (value as? NSNumber)?.doubleValue,
+              seconds.isFinite,
+              seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 }
 
@@ -1867,53 +1882,74 @@ struct TaskListView: View {
     }
 
     private var usageSummary: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "gauge.with.dots.needle.50percent")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(usageTint)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(usageTint)
 
-            switch usageStore.state {
-            case .loading:
-                Text("正在读取剩余用量…")
-                    .foregroundStyle(.secondary)
-            case let .available(windows, isStale):
-                Text("剩余用量")
-                    .foregroundStyle(.secondary)
-                if isStale {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.orange)
-                }
-                Spacer(minLength: 4)
-                ForEach(windows) { window in
-                    HStack(spacing: 3) {
-                        Text(window.label)
-                            .foregroundStyle(.secondary)
-                        Text("\(window.remainingPercent)%")
-                            .fontWeight(.semibold)
-                            .foregroundStyle(usageColor(for: window.remainingPercent))
-                            .monospacedDigit()
+                switch usageStore.state {
+                case .loading:
+                    Text("正在读取剩余用量…")
+                        .foregroundStyle(.secondary)
+                case let .available(windows, isStale):
+                    Text("剩余用量")
+                        .foregroundStyle(.secondary)
+                    if isStale {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
                     }
-                    .fixedSize()
+                    Spacer(minLength: 4)
+                    ForEach(windows) { window in
+                        HStack(spacing: 3) {
+                            Text(window.label)
+                                .foregroundStyle(.secondary)
+                            Text("\(window.remainingPercent)%")
+                                .fontWeight(.semibold)
+                                .foregroundStyle(usageColor(for: window.remainingPercent))
+                                .monospacedDigit()
+                        }
+                        .fixedSize()
+                    }
+                case .unavailable:
+                    Text("用量暂时不可用")
+                        .foregroundStyle(.secondary)
                 }
-            case .unavailable:
-                Text("用量暂时不可用")
-                    .foregroundStyle(.secondary)
+
+                if case .loading = usageStore.state {
+                    Spacer()
+                } else if case .unavailable = usageStore.state {
+                    Spacer()
+                }
             }
 
-            if case .loading = usageStore.state {
-                Spacer()
-            } else if case .unavailable = usageStore.state {
-                Spacer()
+            if case let .available(windows, isStale) = usageStore.state,
+               let resetAt = windows.first(where: { $0.label == "每周" })?.resetAt {
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 8.5, weight: .semibold))
+                    Text("每周额度 \(resetTimeText(resetAt)) 重置")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                .font(.system(size: 9.5))
+                .foregroundStyle(isStale ? Color.orange : Color.secondary)
+                .padding(.leading, 18.5)
             }
         }
         .font(.system(size: 10.5))
         .padding(.horizontal, 9)
-        .frame(height: 28)
+        .padding(.vertical, 6)
+        .frame(minHeight: 28)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .help(usageHelpText)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(usageAccessibilityLabel)
+    }
+
+    private func resetTimeText(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 
     private var usageTint: Color {
@@ -1941,7 +1977,7 @@ struct TaskListView: View {
         case let .available(_, isStale):
             return isStale
                 ? "官方用量服务刚才响应失败，正在自动重试；当前显示上次成功读取的数据。"
-                : "剩余用量每 60 秒刷新。不显示重置时间。"
+                : "剩余用量和每周重置时间每 60 秒刷新。"
         case let .unavailable(message):
             return message
         }
@@ -1952,7 +1988,10 @@ struct TaskListView: View {
         case .loading:
             return "正在读取剩余用量"
         case let .available(windows, isStale):
-            let details = windows.map { "\($0.label)剩余\($0.remainingPercent)%" }.joined(separator: "，")
+            var details = windows.map { "\($0.label)剩余\($0.remainingPercent)%" }.joined(separator: "，")
+            if let resetAt = windows.first(where: { $0.label == "每周" })?.resetAt {
+                details += "，每周额度\(resetTimeText(resetAt))重置"
+            }
             return isStale
                 ? "剩余用量，\(details)，更新稍有延迟，正在自动重试"
                 : "剩余用量，\(details)"
@@ -2491,14 +2530,22 @@ enum SelfTest {
 
             let usageFixture: [String: Any] = [
                 "rateLimits": [
-                    "primary": ["usedPercent": 35, "windowDurationMins": 300],
-                    "secondary": ["usedPercent": 90, "windowDurationMins": 10_080],
+                    "primary": ["usedPercent": 35, "windowDurationMins": 300, "resetsAt": 1_900_000_000],
+                    "secondary": ["usedPercent": 90, "windowDurationMins": 10_080, "resetsAt": 1_900_604_800],
                 ],
             ]
             let usageWindows = try UsageSnapshotParser.windows(from: usageFixture)
             guard usageWindows == [
-                UsageWindowDisplay(label: "5 小时", remainingPercent: 65),
-                UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                UsageWindowDisplay(
+                    label: "5 小时",
+                    remainingPercent: 65,
+                    resetAt: Date(timeIntervalSince1970: 1_900_000_000)
+                ),
+                UsageWindowDisplay(
+                    label: "每周",
+                    remainingPercent: 10,
+                    resetAt: Date(timeIntervalSince1970: 1_900_604_800)
+                ),
             ] else {
                 fputs("SELF_TEST_FAILED usage parsing\n", stderr)
                 return 8
@@ -2680,13 +2727,26 @@ enum UsageClientSelfTest {
         switch result {
         case let .success(windows):
             guard !expectFixtureValues || windows == [
-                    UsageWindowDisplay(label: "5 小时", remainingPercent: 65),
-                    UsageWindowDisplay(label: "每周", remainingPercent: 10),
+                    UsageWindowDisplay(
+                        label: "5 小时",
+                        remainingPercent: 65,
+                        resetAt: Date(timeIntervalSince1970: 1_900_000_000)
+                    ),
+                    UsageWindowDisplay(
+                        label: "每周",
+                        remainingPercent: 10,
+                        resetAt: Date(timeIntervalSince1970: 1_900_604_800)
+                    ),
                   ] else {
                 fputs("USAGE_SELF_TEST_FAILED unexpected values\n", stderr)
                 return 11
             }
-            print(expectFixtureValues ? "USAGE_SELF_TEST_OK windows=2" : "USAGE_PROBE_OK windows=\(windows.count)")
+            let weeklyResetStatus = windows.first(where: { $0.label == "每周" })?.resetAt == nil
+                ? "unavailable"
+                : "available"
+            print(expectFixtureValues
+                ? "USAGE_SELF_TEST_OK windows=2 reset=ok"
+                : "USAGE_PROBE_OK windows=\(windows.count) weekly_reset=\(weeklyResetStatus)")
             return 0
         case let .failure(error):
             fputs("USAGE_SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
@@ -2706,7 +2766,7 @@ enum UsageResilienceSelfTest {
 
         guard waitUntil(timeout: 5, condition: {
             if case let .available(windows, isStale) = store.state {
-                return windows.count == 2 && !isStale
+                return hasWeeklyReset(windows) && !isStale
             }
             return false
         }) else {
@@ -2717,7 +2777,7 @@ enum UsageResilienceSelfTest {
         store.refresh()
         guard waitUntil(timeout: 5, condition: {
             if case let .available(windows, isStale) = store.state {
-                return windows.count == 2 && isStale
+                return hasWeeklyReset(windows) && isStale
             }
             return false
         }) else {
@@ -2727,7 +2787,7 @@ enum UsageResilienceSelfTest {
 
         guard waitUntil(timeout: 5, condition: {
             if case let .available(windows, isStale) = store.state {
-                return windows.count == 2 && !isStale
+                return hasWeeklyReset(windows) && !isStale
             }
             return false
         }) else {
@@ -2735,8 +2795,12 @@ enum UsageResilienceSelfTest {
             return 22
         }
 
-        print("USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok")
+        print("USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok reset=ok")
         return 0
+    }
+
+    private static func hasWeeklyReset(_ windows: [UsageWindowDisplay]) -> Bool {
+        windows.count == 2 && windows.first(where: { $0.label == "每周" })?.resetAt != nil
     }
 
     @MainActor

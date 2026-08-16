@@ -105,7 +105,7 @@ while IFS= read -r line; do
   if (( request_count == 1 )); then
     print '{"id":1,"result":{"serverInfo":{"name":"fake-codex","version":"1"}}}'
   elif (( request_count >= 2 )); then
-    print '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":35,"windowDurationMins":300},"secondary":{"usedPercent":90,"windowDurationMins":10080}}}}'
+    print '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":35,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":90,"windowDurationMins":10080,"resetsAt":1900604800}}}}'
   fi
 done
 ZSH
@@ -123,7 +123,7 @@ while IFS= read -r line; do
     if (( rate_request_count == 2 )); then
       print "{\"id\":${request_id},\"error\":{\"code\":-32000,\"message\":\"temporary fixture failure\"}}"
     else
-      print "{\"id\":${request_id},\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":35,\"windowDurationMins\":300},\"secondary\":{\"usedPercent\":90,\"windowDurationMins\":10080}}}}"
+      print "{\"id\":${request_id},\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":35,\"windowDurationMins\":300,\"resetsAt\":1900000000},\"secondary\":{\"usedPercent\":90,\"windowDurationMins\":10080,\"resetsAt\":1900604800}}}}"
     fi
   fi
 done
@@ -162,7 +162,7 @@ usage_test_output="$(
   CODEX_APP_SERVER_OVERRIDE="$FIXTURE_USAGE_SERVER" \
   "$BINARY" --usage-self-test
 )"
-[[ "$usage_test_output" == "USAGE_SELF_TEST_OK windows=2" ]] || {
+[[ "$usage_test_output" == "USAGE_SELF_TEST_OK windows=2 reset=ok" ]] || {
   print -u2 "Codex 用量协议自检失败：$usage_test_output"
   exit 9
 }
@@ -171,7 +171,7 @@ usage_resilience_output="$(
   CODEX_APP_SERVER_OVERRIDE="$FIXTURE_FLAKY_USAGE_SERVER" \
   "$BINARY" --usage-resilience-self-test
 )"
-[[ "$usage_resilience_output" == "USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok" ]] || {
+[[ "$usage_resilience_output" == "USAGE_RESILIENCE_SELF_TEST_OK stale=ok retry=ok reset=ok" ]] || {
   print -u2 "Codex 用量容错自检失败：$usage_resilience_output"
   exit 14
 }

@@ -1,6 +1,6 @@
 ---
 name: codex-recent-tasks-sidebar
-description: Build, customize, validate, or repair a native macOS Codex recent-tasks companion window. Use when a user wants a Dock-visible SwiftUI utility that reads recent Codex tasks, running/attention/unread state, and remaining usage, groups tasks by working folder, shows activity times, opens exact tasks, docks on either side of Codex, follows Codex foreground state, or stays independently pinned.
+description: Build, customize, validate, or repair a native macOS Codex recent-tasks companion window. Use when a user wants a Dock-visible SwiftUI utility that reads recent Codex tasks, running/attention/unread state, remaining usage, and the weekly usage reset time, groups tasks by working folder, shows activity times, opens exact tasks, docks on either side of Codex, follows Codex foreground state, or stays independently pinned.
 ---
 
 # Codex Recent Tasks Sidebar
@@ -18,7 +18,7 @@ Build from the bundled template instead of recreating the app. Preserve its read
    - recent tasks are grouped by canonical working folder and sorted newest first;
    - renamed task notes from `session_index.jsonl` replace stale database titles on the next refresh;
    - status priority is “待操作 → 运行中 → 待查看 → time”: an active task never shows “待查看” early, a stopped unread task does, and opening it clears the label after refresh;
-   - remaining usage percentages appear without reset times; one transient failure keeps the last successful percentages and retries automatically, while repeated failures leave the task list usable;
+   - remaining usage percentages and the weekly reset time appear in the machine's current time zone; one transient failure keeps the last successful usage snapshot and retries automatically, while repeated failures leave the task list usable;
    - left and right docking both work;
    - docked mode follows the Codex foreground/background layer;
    - pinned mode stays above other apps and remains draggable;
@@ -35,14 +35,14 @@ The public template intentionally uses the generic bundle identifier `io.github.
 ## Safety boundaries
 
 - Treat the Codex SQLite database, rollout files, `session_index.jsonl`, and `.codex-global-state.json` as read-only. Never migrate, vacuum, replace, upload, or write to them.
-- Fetch remaining usage only through the official `codex app-server` using the existing login state. Do not read, print, persist, or commit auth files, tokens, raw account responses, or reset timestamps.
+- Fetch remaining usage only through the official `codex app-server` using the existing login state. Keep only parsed percentages and reset times in memory; do not read, print, persist, or commit auth files, tokens, raw account responses, or other account data.
 - Never commit a real `.sqlite` file, task title, thread ID, username path, API key, token, crash log, or local build cache.
 - Keep task selection keyed by the unique thread ID; titles are not unique identifiers.
 - Keep archived tasks, threads with a real parent edge, and internal agent records excluded. Do not exclude a root thread solely because `thread_source` is labeled `subagent`.
 - Do not claim cross-platform support. The bundled app targets macOS 13+ and is validated on Apple Silicon; compile natively on the target Mac.
 - Interpret blue “运行中” from the latest unmatched `task_started`, orange “待操作” from an unfinished explicit user-input or approval request, and green “待查看” only when the task is no longer active and has an unread update. Match unread by task ID directly and never infer it from child-thread state. These labels never mean the conversation is permanently completed or archived.
 - Never scan a growing rollout from the beginning or repeat its bounded reverse scan on every timer tick. Cache its last complete byte offset and state, advance from appended records on a background queue, and fall back to a bounded reverse scan only when the file is first seen, replaced, truncated, or grows beyond the incremental safety limit.
-- Treat one `account/rateLimits/read` error as transient: keep the last successful in-memory percentages, retry shortly, and restart the official child process only after repeated failure. Do not persist usage responses or expose reset timestamps.
+- Treat one `account/rateLimits/read` error as transient: keep the last successful in-memory percentages and reset times, retry shortly, and restart the official child process only after repeated failure. Do not persist usage responses.
 - If the Codex database schema, unread-state format, app-server rate-limit response, bundle identifier, or deep-link scheme changes, diagnose the current installation before patching the template.
 
 ## Delivery report
