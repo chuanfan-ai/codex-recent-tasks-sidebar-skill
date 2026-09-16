@@ -53,7 +53,8 @@ INSERT INTO threads VALUES
   ('00000000-0000-0000-0000-000000000002', 'Second example task', '/tmp/example-project-b', '', 4102444700000, 4102444700, 0, '', '', '', ''),
   ('00000000-0000-0000-0000-000000000003', 'Excluded internal agent task', '/tmp/example-project-a', '', 4102444600000, 4102444600, 0, 'subagent', '{"subagent":true}', '/tmp/agent', ''),
   ('00000000-0000-0000-0000-000000000004', 'Recovered root task', '/tmp/example-project-a', '', 4102444500000, 4102444500, 0, 'subagent', '', '', ''),
-  ('00000000-0000-0000-0000-000000000005', 'Excluded child task', '/tmp/example-project-a', '', 4102444400000, 4102444400, 0, 'subagent', '', '', '');
+  ('00000000-0000-0000-0000-000000000005', 'Excluded child task', '/tmp/example-project-a', '', 4102444400000, 4102444400, 0, 'subagent', '', '', ''),
+  ('00000000-0000-0000-0000-000000000006', 'Read example task', '/tmp/example-project-b', '', 4102444300000, 4102444300, 0, '', '', '', '');
 INSERT INTO thread_spawn_edges VALUES
   ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000005', 'running');
 SQL
@@ -67,12 +68,23 @@ JSONL
 
 cat > "$FIXTURE_GLOBAL_STATE" <<'JSON'
 {
+  "electron-thread-read-state-v1": {
+    "version": 1,
+    "unreadByIdentity": {
+      "example-identity": {
+        "local": [
+          "00000000-0000-0000-0000-000000000002",
+          "00000000-0000-0000-0000-000000000004",
+          "00000000-0000-0000-0000-000000000005",
+          "invalid"
+        ]
+      }
+    }
+  },
   "electron-persisted-atom-state": {
     "unread-thread-ids-by-host-v1": {
       "local": [
-        "00000000-0000-0000-0000-000000000002",
-        "00000000-0000-0000-0000-000000000005",
-        "invalid"
+        "00000000-0000-0000-0000-000000000001"
       ]
     }
   }
@@ -143,6 +155,7 @@ self_test_output="$(
   CODEX_SELF_TEST_EXPECT_TITLE="Renamed example task" \
   CODEX_SELF_TEST_EXPECT_UNREAD_ID="00000000-0000-0000-0000-000000000002" \
   CODEX_SELF_TEST_EXPECT_READ_ID="00000000-0000-0000-0000-000000000001" \
+  CODEX_SELF_TEST_EXPECT_REVIEW_ID="00000000-0000-0000-0000-000000000004" \
   CODEX_SELF_TEST_EXPECT_RUNNING_ID="00000000-0000-0000-0000-000000000002" \
   CODEX_SELF_TEST_EXPECT_ACTION_ID="00000000-0000-0000-0000-000000000001" \
   "$BINARY" --self-test
@@ -153,7 +166,7 @@ after_global_state_hash="$(/usr/bin/shasum "$FIXTURE_GLOBAL_STATE")"
 after_running_rollout_hash="$(/usr/bin/shasum "$FIXTURE_RUNNING_ROLLOUT")"
 after_action_rollout_hash="$(/usr/bin/shasum "$FIXTURE_ACTION_ROLLOUT")"
 
-[[ "$self_test_output" == *"SELF_TEST_OK count=3 title_override=ok unread_override=ok read_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=1"* ]] || {
+[[ "$self_test_output" == *"SELF_TEST_OK count=4 title_override=ok unread_override=ok read_override=ok review_override=ok runtime_override=ok action_override=ok incremental_runtime=ok usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=2"* ]] || {
   print -u2 "固定测试库自检失败：$self_test_output"
   exit 3
 }
@@ -214,7 +227,7 @@ fallback_output="$(
   CODEX_GLOBAL_STATE_OVERRIDE="$FIXTURE_DIR/missing-global-state.json" \
   "$BINARY" --self-test
 )"
-[[ "$fallback_output" == *"SELF_TEST_OK count=3"* ]] || {
+[[ "$fallback_output" == *"SELF_TEST_OK count=4"* ]] || {
   print -u2 "缺失任务备注索引或未读状态回退测试失败：$fallback_output"
   exit 8
 }

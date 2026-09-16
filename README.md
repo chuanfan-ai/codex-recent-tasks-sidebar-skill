@@ -37,7 +37,7 @@ open "build/CodexRecentTasksSidebar.app"
 - 从 `~/.codex/state_5.sqlite` 或兼容位置只读加载主任务。
 - 从 `~/.codex/session_index.jsonl` 只读合并最新任务备注，改名后会在下一次 30 秒刷新时同步。
 - 从任务自己的 `~/.codex/sessions/` rollout 事件流只读判断状态：运行时显示蓝色“运行中”；等待用户输入或命令授权时显示橙色“待操作”。解析在后台执行，首次定位状态后只增量读取新追加的事件，避免大任务周期性卡住界面。
-- 从 `~/.codex/.codex-global-state.json` 只读匹配 Codex 为当前顶层任务记录的未读更新；任务停止后才显示绿色“待查看”。内部子线程残留不会被误算到顶层任务。
+- 从 `~/.codex/.codex-global-state.json` 的当前 `electron-thread-read-state-v1` 只读匹配 Codex 记录的主任务未读更新；旧版没有该字段时兼容 `unread-thread-ids-by-host-v1`。两种格式都只匹配主任务自身，不提升内部子任务状态。任务停止后才显示绿色“待查看”。
 - 自动排除归档任务、存在真实父子关系的子智能体和内部线程；不会因新版 Codex 的宽泛来源标签误删顶层任务。
 - 按真实工作目录分组；同一文件夹保留全部近期任务。
 - 文件夹和任务都按最近活动时间倒序排列。

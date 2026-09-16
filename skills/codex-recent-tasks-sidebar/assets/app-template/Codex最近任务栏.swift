@@ -189,6 +189,7 @@ private struct ThreadNameRecord: Decodable {
 private enum UnreadTaskStateRepository {
     private static let persistedAtomsKey = "electron-persisted-atom-state"
     private static let unreadThreadsKey = "unread-thread-ids-by-host-v1"
+    private static let threadReadStateKey = "electron-thread-read-state-v1"
     private static let maximumFileSize = 64 * 1024 * 1024
 
     static func loadUnreadThreadIDs() -> Set<String> {
@@ -204,21 +205,42 @@ private enum UnreadTaskStateRepository {
 
     static func unreadThreadIDs(from data: Data) -> Set<String> {
         guard data.count <= maximumFileSize,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let persistedAtoms = root[persistedAtomsKey] as? [String: Any],
-              let unreadThreadsByHost = persistedAtoms[unreadThreadsKey] as? [String: Any] else {
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
         }
 
-        var unreadThreadIDs = Set<String>()
-        for value in unreadThreadsByHost.values {
+        // Codex 已把未读状态迁到顶层；新状态存在时不能回退到可能过期的旧状态。
+        if let value = root[threadReadStateKey] {
+            guard let state = value as? [String: Any],
+                  (state["version"] as? NSNumber)?.intValue == 1,
+                  let identities = state["unreadByIdentity"] as? [String: Any] else {
+                return []
+            }
+            var unreadThreadIDs = Set<String>()
+            for value in identities.values {
+                guard let hosts = value as? [String: Any] else { continue }
+                unreadThreadIDs.formUnion(validThreadIDs(in: hosts))
+            }
+            return unreadThreadIDs
+        }
+
+        guard let persistedAtoms = root[persistedAtomsKey] as? [String: Any],
+              let unreadThreadsByHost = persistedAtoms[unreadThreadsKey] as? [String: Any] else {
+            return []
+        }
+        return validThreadIDs(in: unreadThreadsByHost)
+    }
+
+    private static func validThreadIDs(in hosts: [String: Any]) -> Set<String> {
+        var result = Set<String>()
+        for value in hosts.values {
             guard let threadIDs = value as? [Any] else { continue }
             for case let threadID as String in threadIDs
                 where threadID.count <= 128 && UUID(uuidString: threadID) != nil {
-                unreadThreadIDs.insert(threadID)
+                result.insert(threadID)
             }
         }
-        return unreadThreadIDs
+        return result
     }
 
     private static func currentGlobalStateURL() -> URL? {
@@ -797,7 +819,7 @@ struct TaskRepository {
                 let renamedTask = titleOverrides[task.id].map {
                     task.replacingTitle(with: $0)
                 } ?? task
-                // Codex 按当前任务 ID 标记和清除未读。内部子线程的残留未读不能抬升为顶层任务未读。
+                // 只匹配当前主任务自身的未读；内部子任务残留不能提升为主任务未读。
                 let unreadTask = renamedTask.replacingUnreadUpdate(
                     with: unreadThreadIDs.contains(task.id)
                 )
@@ -2452,6 +2474,18 @@ enum SelfTest {
                 }
                 readOverrideStatus = " read_override=ok"
             }
+            var reviewOverrideStatus = ""
+            if let expectedReviewID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_REVIEW_ID"] {
+                guard tasks.contains(where: {
+                    $0.id == expectedReviewID
+                        && $0.hasUnreadUpdate
+                        && $0.displayState == .needsReview
+                }) else {
+                    fputs("SELF_TEST_FAILED review override\n", stderr)
+                    return 18
+                }
+                reviewOverrideStatus = " review_override=ok"
+            }
             var runtimeOverrideStatus = ""
             if let expectedRunningID = ProcessInfo.processInfo.environment["CODEX_SELF_TEST_EXPECT_RUNNING_ID"] {
                 guard tasks.contains(where: {
@@ -2470,6 +2504,7 @@ enum SelfTest {
                     $0.id == expectedActionID
                         && $0.runtimeState == .needsAction
                         && $0.displayState == .needsAction
+                        && !$0.hasUnreadUpdate
                 }) else {
                     fputs("SELF_TEST_FAILED action override\n", stderr)
                     return 14
@@ -2561,6 +2596,24 @@ enum SelfTest {
 
             let unreadFixture = Data("""
             {
+              "electron-thread-read-state-v1": {
+                "version": 1,
+                "unreadByIdentity": {
+                  "example-identity": {
+                    "local": ["00000000-0000-0000-0000-000000000002", "invalid"],
+                    "remote": ["00000000-0000-0000-0000-000000000003"]
+                  }
+                }
+              },
+              "electron-persisted-atom-state": {
+                "unread-thread-ids-by-host-v1": {
+                  "local": ["00000000-0000-0000-0000-000000000001"]
+                }
+              }
+            }
+            """.utf8)
+            let legacyUnreadFixture = Data("""
+            {
               "electron-persisted-atom-state": {
                 "unread-thread-ids-by-host-v1": {
                   "local": [
@@ -2575,9 +2628,17 @@ enum SelfTest {
             }
             """.utf8)
             guard UnreadTaskStateRepository.unreadThreadIDs(from: unreadFixture) == Set([
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000003",
+            ]),
+            UnreadTaskStateRepository.unreadThreadIDs(from: legacyUnreadFixture) == Set([
                 "00000000-0000-0000-0000-000000000001",
                 "00000000-0000-0000-0000-000000000002",
             ]),
+            UnreadTaskStateRepository.unreadThreadIDs(from: Data("""
+            {"electron-thread-read-state-v1":{"version":1,"unreadByIdentity":{}},
+             "electron-persisted-atom-state":{"unread-thread-ids-by-host-v1":{"local":["00000000-0000-0000-0000-000000000001"]}}}
+            """.utf8)).isEmpty,
             UnreadTaskStateRepository.unreadThreadIDs(from: Data("not json".utf8)).isEmpty else {
                 fputs("SELF_TEST_FAILED unread state parsing\n", stderr)
                 return 11
@@ -2679,7 +2740,7 @@ enum SelfTest {
             }
 
             let unreadUpdateCount = tasks.filter(\.hasUnreadUpdate).count
-            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
+            print("SELF_TEST_OK count=\(tasks.count)\(titleOverrideStatus)\(unreadOverrideStatus)\(readOverrideStatus)\(reviewOverrideStatus)\(runtimeOverrideStatus)\(actionOverrideStatus)\(incrementalRuntimeStatus) usage=ok unread_state=ok runtime_state=ok display_state=ok unread_update_count=\(unreadUpdateCount) database=\(result.databaseURL.path)")
             return 0
         } catch {
             fputs("SELF_TEST_FAILED \(error.localizedDescription)\n", stderr)
